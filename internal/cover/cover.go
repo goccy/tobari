@@ -106,15 +106,19 @@ func parseOption(args []string) ([]string, *Option, error) {
 	}, nil
 }
 
-func writeOutputFileList(filename string, outputFiles []string) error {
+func writeOutputFileList(filename string, outputFiles []string) (e error) {
 	file, err := os.Create(filename)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		e = file.Close()
+	}()
 
 	for _, outFile := range outputFiles {
-		fmt.Fprintf(file, "%s\n", outFile)
+		if _, err := fmt.Fprintf(file, "%s\n", outFile); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -127,7 +131,9 @@ func annotateFile(src, dst, mode string) error {
 	if err != nil {
 		return err
 	}
-	os.Stdout.Write(b)
+	if _, err := os.Stdout.Write(b); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -320,6 +326,7 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 				fname = star + p.Name + "." + fname
 			}
 		}
+		_ = fname
 		ast.Walk(f, n.Body)
 		return nil
 	case *ast.FuncLit:

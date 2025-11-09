@@ -31,8 +31,9 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprint(os.Stdout, string(out))
-		return nil
+		if _, err := fmt.Fprint(os.Stdout, string(out)); err != nil {
+			return err
+		}
 	}
 
 	toolPath := args[1]

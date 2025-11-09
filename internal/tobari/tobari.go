@@ -33,7 +33,7 @@ func WriteCoverProfile(mode Mode, w io.Writer) {
 	entryMapMu.Lock()
 	defer entryMapMu.Unlock()
 
-	fmt.Fprintf(w, "mode: %s\n", mode)
+	_, _ = fmt.Fprintf(w, "mode: %s\n", mode)
 	for _, e := range entryMap {
 		e.Root.coverprofile(w)
 	}
@@ -147,7 +147,7 @@ func (b *TraceBlock) coverprofile(w io.Writer) {
 	for _, c := range b.CounterMap {
 		sum += c.Counter
 	}
-	fmt.Fprintf(
+	_, _ = fmt.Fprintf(
 		w,
 		"%s:%d.%d,%d.%d %d %d\n",
 		b.FileName, b.Start.Line, b.Start.Col, b.End.Line, b.End.Col, b.NumStmts,
