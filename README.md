@@ -1,5 +1,9 @@
 # Tobari
 
+[![PkgGoDev](https://pkg.go.dev/badge/github.com/goccy/tobari)](https://pkg.go.dev/github.com/goccy/tobari)
+![Go](https://github.com/goccy/tobari/workflows/Go/badge.svg)
+
+
 "Tobari" was named after the Japanese word 「帷」, which carries the meaning of "cover" in English.
 
 Tobari is a coverage measurement tool based on goroutine IDs. With finer-grained control that is not possible with runtime/coverage, it allows you to selectively measure only the code you truly want to track.
