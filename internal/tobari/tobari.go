@@ -1,6 +1,7 @@
 package tobari
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"runtime"
@@ -29,25 +30,61 @@ const (
 	AtomicMode Mode = "atomic"
 )
 
-func WriteCoverProfile(mode Mode, w io.Writer) {
-	entryMapMu.Lock()
-	defer entryMapMu.Unlock()
+func CoverProfileMap(mode Mode) map[string]string {
+	entryMapMu.RLock()
+	defer entryMapMu.RUnlock()
 
-	_, _ = fmt.Fprintf(w, "mode: %s\n", mode)
+	ret := make(map[string]string)
 	for _, e := range entryMap {
-		e.Root.Coverprofile(w)
+		ret[e.Name] = renderMap(mode, e.CoverprofileMap())
+	}
+	return ret
+}
+
+func WriteCoverProfile(mode Mode, w io.Writer) {
+	entryMapMu.RLock()
+	defer entryMapMu.RUnlock()
+
+	mergeMap := make(map[string]string)
+	for _, e := range entryMap {
+		for k, v := range e.CoverprofileMap() {
+			mergeMap[k] = v
+		}
+	}
+	_, _ = fmt.Fprintf(w, renderMap(mode, mergeMap))
+}
+
+func WriteCoverProfileByName(name string, mode Mode, w io.Writer) {
+	entryMapMu.RLock()
+	defer entryMapMu.RUnlock()
+
+	for _, e := range entryMap {
+		if e.Name != name {
+			continue
+		}
+		_, _ = fmt.Fprintf(w, renderMap(mode, e.CoverprofileMap()))
+		return
 	}
 }
 
 func Cover(fn func()) {
+	cover("", fn)
+}
+
+func CoverWithName(name string, fn func()) {
+	cover(name, fn)
+}
+
+func cover(name string, fn func()) {
 	ch := make(chan struct{})
-	_, file, line, _ := runtime.Caller(1)
-	entryID := fmt.Sprintf("%s:%d", file, line)
+	_, file, line, _ := runtime.Caller(2)
+	entryID := fmt.Sprintf("%s:%s:%d", name, file, line)
 	go func() {
 		gid := currentGID()
 		e := getEntry(entryID)
 		if e == nil {
 			e = &TraceEntry{
+				Name: name,
 				Root: newTraceG(),
 			}
 			setEntry(entryID, e)
@@ -65,7 +102,14 @@ type Pos struct {
 }
 
 type TraceEntry struct {
+	Name string
 	Root *TraceG
+}
+
+func (e *TraceEntry) CoverprofileMap() map[string]string {
+	coverMap := createCoverprofileMapByMeta()
+	e.Root.coverprofile(coverMap)
+	return coverMap
 }
 
 func getEntry(id string) *TraceEntry {
@@ -115,23 +159,15 @@ func (g *TraceG) hasBlock(blockIdx int) bool {
 	return exists
 }
 
-func (g *TraceG) Coverprofile(w io.Writer) {
-	renderMap := createRenderMapByMeta()
-	g.renderCoverprofile(renderMap)
-	for _, key := range renderKeys() {
-		_, _ = fmt.Fprintf(w, renderMap[key]+"\n")
-	}
-}
-
-func (g *TraceG) renderCoverprofile(renderMap map[string]string) {
+func (g *TraceG) coverprofile(coverMap map[string]string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	for _, block := range g.Blocks {
-		block.renderCoverprofile(renderMap)
+		block.coverprofile(coverMap)
 	}
 	for _, child := range g.Children {
-		child.renderCoverprofile(renderMap)
+		child.coverprofile(coverMap)
 	}
 }
 
@@ -150,12 +186,12 @@ type TraceCounter struct {
 	Counter uint64
 }
 
-func (b *TraceBlock) renderCoverprofile(renderMap map[string]string) {
+func (b *TraceBlock) coverprofile(coverMap map[string]string) {
 	var sum uint64
 	for _, c := range b.CounterMap {
 		sum += c.Counter
 	}
-	renderMap[blockID(b.FileName, b.BlockIdx)] = fmt.Sprintf(
+	coverMap[blockID(b.FileName, b.BlockIdx)] = fmt.Sprintf(
 		"%s:%d.%d,%d.%d %d %d",
 		b.FileName,
 		b.Start.Line, b.Start.Col,
@@ -281,7 +317,7 @@ func AddCoverMeta(md Metadata) bool {
 	return true
 }
 
-func createRenderMapByMeta() map[string]string {
+func createCoverprofileMapByMeta() map[string]string {
 	mdMu.RLock()
 	defer mdMu.RUnlock()
 
@@ -300,17 +336,23 @@ func createRenderMapByMeta() map[string]string {
 	return ret
 }
 
-func renderKeys() []string {
+func renderMap(mode Mode, coverMap map[string]string) string {
 	mdMu.RLock()
-	defer mdMu.RUnlock()
 
-	var ret []string
+	var keys []string
 	for _, md := range mds {
 		for idx := range md.Blocks {
-			ret = append(ret, blockID(md.FileName, idx))
+			keys = append(keys, blockID(md.FileName, idx))
 		}
 	}
-	return ret
+
+	mdMu.RUnlock()
+
+	b := bytes.NewBuffer([]byte(fmt.Sprintf("mode: %s\n", mode)))
+	for _, key := range keys {
+		_, _ = fmt.Fprintf(b, coverMap[key]+"\n")
+	}
+	return b.String()
 }
 
 func blockID(fileName string, blockIdx int) string {
