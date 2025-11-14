@@ -194,11 +194,28 @@ func AddTracePointWithContent(filename string, content []byte, mode string) ([]b
 	// Walk the AST and instrument code
 	ast.Walk(file, file.astFile)
 
-	return append(file.edit.Bytes(), []byte(`
+	blocks := make([]string, 0, len(file.blocks))
+	for _, block := range file.blocks {
+		start := file.fset.Position(block.startByte)
+		end := file.fset.Position(block.endByte)
+		blocks = append(blocks, fmt.Sprintf(`{
+			Start: github_com_goccy_tobari.Pos{Line: %d, Col: %d},
+			End: github_com_goccy_tobari.Pos{Line: %d, Col: %d},
+			NumStmts: %d,
+		}`, start.Line, start.Column, end.Line, end.Column, block.numStmt))
+	}
+	md := fmt.Sprintf(
+		`github_com_goccy_tobari.Metadata{FileName: "%s", Blocks: []*github_com_goccy_tobari.Block{%s}}`,
+		file.name,
+		strings.Join(blocks, ","),
+	)
+	footer := fmt.Sprintf(`
 var _ = github_com_goccy_tobari.SetGIDFunc(func() uint64 {
   return github_com_goccy_tobari_runtime.GID()
 })
-`)...), nil
+var _ = github_com_goccy_tobari.AddCoverMeta(%s)
+`, md)
+	return append(file.edit.Bytes(), []byte(footer)...), nil
 }
 
 func (f *File) addImport() {

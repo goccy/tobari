@@ -35,7 +35,7 @@ func WriteCoverProfile(mode Mode, w io.Writer) {
 
 	_, _ = fmt.Fprintf(w, "mode: %s\n", mode)
 	for _, e := range entryMap {
-		e.Root.coverprofile(w)
+		e.Root.Coverprofile(w)
 	}
 }
 
@@ -115,15 +115,23 @@ func (g *TraceG) hasBlock(blockIdx int) bool {
 	return exists
 }
 
-func (g *TraceG) coverprofile(w io.Writer) {
+func (g *TraceG) Coverprofile(w io.Writer) {
+	renderMap := createRenderMapByMeta()
+	g.renderCoverprofile(renderMap)
+	for _, key := range renderKeys() {
+		_, _ = fmt.Fprintf(w, renderMap[key]+"\n")
+	}
+}
+
+func (g *TraceG) renderCoverprofile(renderMap map[string]string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	for _, block := range g.Blocks {
-		block.coverprofile(w)
+		block.renderCoverprofile(renderMap)
 	}
 	for _, child := range g.Children {
-		child.coverprofile(w)
+		child.renderCoverprofile(renderMap)
 	}
 }
 
@@ -142,15 +150,17 @@ type TraceCounter struct {
 	Counter uint64
 }
 
-func (b *TraceBlock) coverprofile(w io.Writer) {
+func (b *TraceBlock) renderCoverprofile(renderMap map[string]string) {
 	var sum uint64
 	for _, c := range b.CounterMap {
 		sum += c.Counter
 	}
-	_, _ = fmt.Fprintf(
-		w,
-		"%s:%d.%d,%d.%d %d %d\n",
-		b.FileName, b.Start.Line, b.Start.Col, b.End.Line, b.End.Col, b.NumStmts,
+	renderMap[blockID(b.FileName, b.BlockIdx)] = fmt.Sprintf(
+		"%s:%d.%d,%d.%d %d %d",
+		b.FileName,
+		b.Start.Line, b.Start.Col,
+		b.End.Line, b.End.Col,
+		b.NumStmts,
 		sum,
 	)
 }
@@ -164,6 +174,8 @@ var (
 	gMapMu     sync.RWMutex
 	blockMap   = make(map[string]*TraceBlock)
 	blockMapMu sync.RWMutex
+	mdMu       sync.RWMutex
+	mds        []*Metadata
 )
 
 func SetGIDFunc(fn func() uint64) bool {
@@ -248,6 +260,57 @@ func getBlockWithCount(fileName string, pgid, gid uint64, blockIdx, startLine, e
 	}
 	blockMap[bid] = block
 	return block
+}
+
+type Metadata struct {
+	FileName string
+	Blocks   []*Block
+}
+
+type Block struct {
+	Start    Pos
+	End      Pos
+	NumStmts int
+}
+
+func AddCoverMeta(md Metadata) bool {
+	mdMu.Lock()
+	defer mdMu.Unlock()
+
+	mds = append(mds, &md)
+	return true
+}
+
+func createRenderMapByMeta() map[string]string {
+	mdMu.RLock()
+	defer mdMu.RUnlock()
+
+	ret := make(map[string]string)
+	for _, md := range mds {
+		for idx, block := range md.Blocks {
+			ret[blockID(md.FileName, idx)] = fmt.Sprintf(
+				"%s:%d.%d,%d.%d %d 0",
+				md.FileName,
+				block.Start.Line, block.Start.Col,
+				block.End.Line, block.End.Col,
+				block.NumStmts,
+			)
+		}
+	}
+	return ret
+}
+
+func renderKeys() []string {
+	mdMu.RLock()
+	defer mdMu.RUnlock()
+
+	var ret []string
+	for _, md := range mds {
+		for idx := range md.Blocks {
+			ret = append(ret, blockID(md.FileName, idx))
+		}
+	}
+	return ret
 }
 
 func blockID(fileName string, blockIdx int) string {

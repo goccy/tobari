@@ -4,7 +4,10 @@ import "github.com/goccy/tobari/internal/tobari"
 
 type (
 	// Mode corresponds to the mode in the coverprofile format.
-	Mode = tobari.Mode
+	Mode     = tobari.Mode
+	Metadata = tobari.Metadata
+	Block    = tobari.Block
+	Pos      = tobari.Pos
 )
 
 const (
@@ -37,4 +40,6 @@ var (
 	// This function is an API used at measurement points.
 	// It is used at coverage measurement points.
 	Trace = tobari.Trace
+
+	AddCoverMeta = tobari.AddCoverMeta
 )
