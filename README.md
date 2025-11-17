@@ -257,7 +257,7 @@ go tool cover -html test.cover
 
 This will produce an output like the following. What’s notable is that even though both foo and bar are accessed after coverage measurement starts, only foo is actually measured.
 
-<img width="791" height="771" alt="image" src="https://github.com/user-attachments/assets/d89a3c38-8ce9-4867-a4a0-d6b7fe96ad3c" />
+<img width="778" height="889" alt="Image" src="https://github.com/user-attachments/assets/00231035-27df-4025-bb4c-8ed3b87a0848" />
 
 # How it works
 
