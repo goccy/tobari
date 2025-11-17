@@ -66,8 +66,9 @@ func isCoverVOption(args []string) bool {
 
 func containsSelfPackageFile(args []string) bool {
 	for _, arg := range args {
-		if strings.Contains(arg, "/goccy/tobari/") && strings.HasSuffix(arg, ".go") {
-			if strings.Contains(arg, "/goccy/tobari/internal") {
+		fmt.Fprintln(os.Stderr, "arg", arg)
+		if strings.Contains(arg, "/tobari/") && strings.HasSuffix(arg, ".go") {
+			if strings.Contains(arg, "/tobari/internal") {
 				return true
 			}
 			if filepath.Base(arg) == "tobari.go" {
