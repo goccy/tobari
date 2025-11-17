@@ -78,7 +78,7 @@ Next, to run the example, clone the repository and navigate to the repository ro
 
 ```
 git clone https://github.com/goccy/tobari.git
-cd tobari
+cd tobari/examples/http
 ```
 
 The examples/http directory contains code structured as follows.
@@ -246,7 +246,7 @@ func main() {
 Run this code using the following command.
 
 ```
-GOFLAGS="$(tobari flags)" go run ./examples/http/main.go
+GOFLAGS="$(tobari flags)" go run .
 ```
 
 Then, a `test.cover` file should be created in the current directory. Let’s view it using `go tool cover -html`.
