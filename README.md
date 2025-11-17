@@ -38,7 +38,7 @@ GOFLAGS="$(tobari flags)" go run ./examples/http/main.go
 `tobari flags` return execution results as shown below.
 
 ```
--cover -overlay=/var/folders/6g/zp4b7mqx7kg5mpdjjk98hz5w0000gp/T/tobari/go1.25.1/overlay.json -toolexec=/path/to/bin/tobari
+-cover -overlay=/var/folders/6g/zp4b7mqx7kg5mpdjjk98hz5w0000gp/T/tobari/go1.25.1/overlay.json -toolexec=/home/username/go/bin/tobari
 ```
 
 Next, just like when using the `runtime/coverage` package, make modifications to the code you want to measure.
@@ -246,7 +246,7 @@ func main() {
 Run this code using the following command.
 
 ```
-GOFLAGS="$(/path/to/tobari flags)" go run ./examples/http/main.go
+GOFLAGS="$(tobari flags)" go run ./examples/http/main.go
 ```
 
 Then, a `test.cover` file should be created in the current directory. Let’s view it using `go tool cover -html`.

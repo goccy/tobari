@@ -3,6 +3,7 @@ package flags
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -10,12 +11,16 @@ import (
 )
 
 func Run(ctx context.Context, tobariBinPath string) (string, error) {
-	if !filepath.IsAbs(tobariBinPath) {
-		p, err := filepath.Abs(tobariBinPath)
+	path, err := exec.LookPath(tobariBinPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to find tobari binary path from %s: %w", tobariBinPath, err)
+	}
+	if !filepath.IsAbs(path) {
+		p, err := filepath.Abs(path)
 		if err != nil {
 			return "", fmt.Errorf("failed to get abs path from %s: %w", tobariBinPath, err)
 		}
-		tobariBinPath = p
+		path = p
 	}
 	f, err := overlay.Create(ctx)
 	if err != nil {
@@ -24,6 +29,6 @@ func Run(ctx context.Context, tobariBinPath string) (string, error) {
 	return strings.Join([]string{
 		"-cover",
 		"-overlay=" + f,
-		"-toolexec=" + tobariBinPath,
+		"-toolexec=" + path,
 	}, " "), nil
 }
