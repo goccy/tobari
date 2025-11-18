@@ -40,10 +40,11 @@ func Run(ctx context.Context, args []string) error {
 		return err
 	}
 	pkgName := file.Name.String()
-	fmt.Fprintf(os.Stderr, "focus\n")
-	if err := focus(pkgName, inputFiles[0]); err != nil {
+	depMap, err := createFunctionDependencyMap(pkgName, inputFiles[0])
+	if err != nil {
 		return err
 	}
+	fmt.Fprintf(os.Stderr, "depMap: %v\n", depMap)
 	if len(inputFiles) == 1 && opt.output != "" {
 		if err := annotateFile(inputFiles[0], opt.output, opt.mode); err != nil {
 			return err
