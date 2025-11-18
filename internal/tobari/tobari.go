@@ -251,6 +251,7 @@ type Metadata struct {
 type Function struct {
 	Name   string
 	Blocks []*Block
+	Deps   []string
 }
 
 type Block struct {

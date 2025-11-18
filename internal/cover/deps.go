@@ -15,7 +15,12 @@ import (
 	"golang.org/x/tools/go/ssa/ssautil"
 )
 
-func createFunctionDependencyMap(pkg, path string) (map[string][]string, error) {
+type FunctionDependency struct {
+	PkgPath string
+	DepMap  map[string][]string
+}
+
+func createFunctionDependencyMap(pkg, path string) (*FunctionDependency, error) {
 	prog, targetPkg, err := getSSAProgram(pkg, path)
 	if err != nil {
 		return nil, err
@@ -29,7 +34,10 @@ func createFunctionDependencyMap(pkg, path string) (map[string][]string, error) 
 		}
 		depMap[n.Func.String()] = analyzeFuncDeps(targetPkg, n)
 	}
-	return depMap, nil
+	return &FunctionDependency{
+		PkgPath: targetPkg.Pkg.Path(),
+		DepMap:  depMap,
+	}, nil
 }
 
 func getSSAProgram(pkg, path string) (*ssa.Program, *ssa.Package, error) {

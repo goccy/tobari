@@ -44,9 +44,8 @@ func Run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "depMap: %v\n", depMap)
 	if len(inputFiles) == 1 && opt.output != "" {
-		if err := annotateFile(inputFiles[0], opt.output, opt.mode); err != nil {
+		if err := annotateFile(depMap, inputFiles[0], opt.output, opt.mode); err != nil {
 			return err
 		}
 		if opt.outputFileList != "" {
@@ -65,7 +64,7 @@ func Run(ctx context.Context, args []string) error {
 			base = base[:len(base)-len(filepath.Ext(base))]
 		}
 		outputName := base + ".cover.go"
-		if err := annotateFile(inputFile, outputName, opt.mode); err != nil {
+		if err := annotateFile(depMap, inputFile, outputName, opt.mode); err != nil {
 			return err
 		}
 		outputFiles = append(outputFiles, outputName)
@@ -137,11 +136,11 @@ func writeOutputFileList(filename string, outputFiles []string) (e error) {
 	return nil
 }
 
-func annotateFile(src, dst, mode string) error {
+func annotateFile(dep *FunctionDependency, src, dst, mode string) error {
 	if dst != "" {
-		return CreateFile(src, dst, mode)
+		return createFile(dep, src, dst, mode)
 	}
-	b, err := AddTracePoint(src, mode)
+	b, err := addTracePoint(dep, src, mode)
 	if err != nil {
 		return err
 	}
@@ -151,8 +150,8 @@ func annotateFile(src, dst, mode string) error {
 	return nil
 }
 
-func CreateFile(src, dst, mode string) error {
-	converted, err := AddTracePoint(src, mode)
+func createFile(dep *FunctionDependency, src, dst, mode string) error {
+	converted, err := addTracePoint(dep, src, mode)
 	if err != nil {
 		return err
 	}
@@ -162,12 +161,12 @@ func CreateFile(src, dst, mode string) error {
 	return nil
 }
 
-func AddTracePoint(src, mode string) ([]byte, error) {
+func addTracePoint(dep *FunctionDependency, src, mode string) ([]byte, error) {
 	f, err := os.ReadFile(src)
 	if err != nil {
 		return nil, err
 	}
-	return AddTracePointWithContent(src, f, mode)
+	return addTracePointWithContent(dep, src, f, mode)
 }
 
 type File struct {
@@ -179,6 +178,7 @@ type File struct {
 	funcs   []*Function
 	content []byte
 	edit    *Buffer
+	funcDep *FunctionDependency
 }
 
 func (f *File) nextBlockIndex() int {
@@ -219,7 +219,7 @@ func (f *Function) createAnonymFuncName() string {
 	return fmt.Sprintf("%s$%d", f.name, f.anonymFuncIdx)
 }
 
-func AddTracePointWithContent(filename string, content []byte, mode string) ([]byte, error) {
+func addTracePointWithContent(dep *FunctionDependency, filename string, content []byte, mode string) ([]byte, error) {
 	fset := token.NewFileSet()
 	parsedFile, err := parser.ParseFile(fset, filename, content, parser.ParseComments)
 	if err != nil {
@@ -233,6 +233,7 @@ func AddTracePointWithContent(filename string, content []byte, mode string) ([]b
 		content: content,
 		edit:    NewBuffer(content),
 		astFile: parsedFile,
+		funcDep: dep,
 	}
 
 	// Add import of github.com/goccy/tobari
@@ -263,7 +264,17 @@ func (f *File) renderMetadata() string {
 func (f *File) renderFunctions(fns []*Function) string {
 	rendered := make([]string, 0, len(fns))
 	for _, fn := range fns {
-		rendered = append(rendered, fmt.Sprintf(`{Name: "%s", Blocks: %s}`, fn.name, f.renderBlocks(fn.blocks)))
+		fqdn := fmt.Sprintf("%s.%s", f.funcDep.PkgPath, fn.name)
+		deps, exists := f.funcDep.DepMap[fqdn]
+		if !exists {
+			fmt.Fprintf(os.Stderr, "failed to find function dependencies from %s\n", fqdn)
+		}
+		rendered = append(rendered,
+			fmt.Sprintf(
+				`{Name: "%s.%s", Blocks: %s, Deps: %s}`,
+				f.funcDep.PkgPath, fn.name, f.renderBlocks(fn.blocks), f.renderDeps(deps),
+			),
+		)
 	}
 	return fmt.Sprintf(`[]*%s.Function{%s}`, tobariPkg, strings.Join(rendered, ","))
 }
@@ -276,6 +287,14 @@ func (f *File) renderBlocks(blocks []*tobari.Block) string {
 		)
 	}
 	return fmt.Sprintf(`[]*%s.Block{%s}`, tobariPkg, strings.Join(rendered, ","))
+}
+
+func (f *File) renderDeps(deps []string) string {
+	rendered := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		rendered = append(rendered, fmt.Sprintf("%q", dep))
+	}
+	return fmt.Sprintf(`[]string{%s}`, strings.Join(rendered, ","))
 }
 
 func (f *File) renderPos(pos tobari.Pos) string {
