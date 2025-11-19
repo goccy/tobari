@@ -74,10 +74,11 @@ First, install the tobari CLI using the following command.
 go install github.com/goccy/tobari/cmd/tobari@latest
 ```
 
-Next, to run the example, clone the repository and navigate to the repository root.
+Next, to run the example, clone the repository and move to the repository root.
 
 ```
 git clone https://github.com/goccy/tobari.git
+cd tobari
 ```
 
 The examples/http directory contains code structured as follows.
