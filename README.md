@@ -78,7 +78,6 @@ Next, to run the example, clone the repository and navigate to the repository ro
 
 ```
 git clone https://github.com/goccy/tobari.git
-cd tobari/examples/http
 ```
 
 The examples/http directory contains code structured as follows.
@@ -138,6 +137,9 @@ func run(ctx context.Context) error {
 	})
 
 	mux.HandleFunc("/foo", func(w http.ResponseWriter, req *http.Request) {
+		if v := req.Header.Get("xxxx"); v != "" {
+			uncoveredFunc()
+		}
 		fmt.Fprintf(w, "foo")
 	})
 	mux.HandleFunc("/bar", func(w http.ResponseWriter, req *http.Request) {
@@ -236,6 +238,18 @@ func run(ctx context.Context) error {
 	return nil
 }
 
+func uncoveredFunc() {
+	uncoveredFunc2()
+}
+
+func uncoveredFunc2() {
+	uncoveredFunc3()
+}
+
+func uncoveredFunc3() {
+	fmt.Println("uncovered func3")
+}
+
 func main() {
 	if err := run(context.Background()); err != nil {
 		log.Fatal(err)
@@ -246,7 +260,7 @@ func main() {
 Run this code using the following command.
 
 ```
-GOFLAGS="$(tobari flags)" go run .
+GOFLAGS="$(tobari flags)" go run ./examples/http/main.go
 ```
 
 Then, a `test.cover` file should be created in the current directory. Let’s view it using `go tool cover -html`.
@@ -255,9 +269,11 @@ Then, a `test.cover` file should be created in the current directory. Let’s vi
 go tool cover -html test.cover
 ```
 
-This will produce an output like the following. What’s notable is that even though both foo and bar are accessed after coverage measurement starts, only foo is actually measured.
+This will produce an output like the following. Only the coverage related to foo is displayed.
 
-<img width="778" height="889" alt="Image" src="https://github.com/user-attachments/assets/00231035-27df-4025-bb4c-8ed3b87a0848" />
+<img width="880" height="505" alt="Image" src="https://github.com/user-attachments/assets/6738ffdc-5119-4719-96b8-e5fbd8d59d44" />
+<img width="803" height="200" alt="Image" src="https://github.com/user-attachments/assets/f9b8fdf4-7d66-4e18-b9a0-af12dc06ff44" />
+<img width="418" height="223" alt="Image" src="https://github.com/user-attachments/assets/ca52ac83-10aa-47a0-99b4-fb72fe1d863a" />
 
 # How it works
 
