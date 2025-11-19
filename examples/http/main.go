@@ -52,6 +52,9 @@ func run(ctx context.Context) error {
 	})
 
 	mux.HandleFunc("/foo", func(w http.ResponseWriter, req *http.Request) {
+		if v := req.Header.Get("xxxx"); v != "" {
+			uncoveredFunc()
+		}
 		fmt.Fprintf(w, "foo")
 	})
 	mux.HandleFunc("/bar", func(w http.ResponseWriter, req *http.Request) {
@@ -148,6 +151,18 @@ func run(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func uncoveredFunc() {
+	uncoveredFunc2()
+}
+
+func uncoveredFunc2() {
+	uncoveredFunc3()
+}
+
+func uncoveredFunc3() {
+	fmt.Println("uncovered func3")
 }
 
 func main() {

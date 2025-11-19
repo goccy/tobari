@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"maps"
 	"runtime"
 	"sync"
 )
@@ -104,21 +103,20 @@ type TraceEntry struct {
 }
 
 func (e *TraceEntry) CoverprofileMap() map[string]string {
-	newCoverprofileMap := make(map[string]string)
-	allCoverprofileMapMu.RLock()
-	maps.Copy(newCoverprofileMap, allCoverprofileMap)
-	allCoverprofileMapMu.RUnlock()
-
 	blockToCountMap := make(map[string]int)
 	for _, root := range e.Roots {
 		root.blockToCountMap(blockToCountMap)
 	}
-	for blockID, count := range blockToCountMap {
-		block := getBlock(blockID)
+
+	newCoverprofileMap := make(map[string]string)
+	hitCandidateFuncMap := make(map[*Function]struct{})
+	for bid, count := range blockToCountMap {
+		block := getBlock(bid)
 		if block == nil {
 			continue
 		}
-		newCoverprofileMap[blockID] = fmt.Sprintf(
+		resolveCandidateFuncMap(block.Function, hitCandidateFuncMap)
+		newCoverprofileMap[bid] = fmt.Sprintf(
 			"%s:%d.%d,%d.%d %d %d",
 			block.FileName,
 			block.Start.Line, block.Start.Col,
@@ -127,7 +125,33 @@ func (e *TraceEntry) CoverprofileMap() map[string]string {
 			count,
 		)
 	}
+	for fn := range hitCandidateFuncMap {
+		for _, block := range fn.Blocks {
+			bid := blockID(block.FileName, block.Idx)
+			if _, exists := newCoverprofileMap[bid]; exists {
+				continue
+			}
+			newCoverprofileMap[bid] = fmt.Sprintf(
+				"%s:%d.%d,%d.%d %d 0",
+				block.FileName,
+				block.Start.Line, block.Start.Col,
+				block.End.Line, block.End.Col,
+				block.NumStmts,
+			)
+		}
+	}
 	return newCoverprofileMap
+}
+
+func resolveCandidateFuncMap(fn *Function, fnMap map[*Function]struct{}) {
+	if _, exists := fnMap[fn]; exists {
+		return
+	}
+
+	fnMap[fn] = struct{}{}
+	for _, ref := range fn.DepRefs {
+		resolveCandidateFuncMap(ref, fnMap)
+	}
 }
 
 func getEntry(id string) *TraceEntry {
@@ -249,8 +273,10 @@ type Metadata struct {
 }
 
 type Function struct {
-	Name   string
-	Blocks []*Block
+	Name    string
+	Blocks  []*Block
+	Deps    []string
+	DepRefs []*Function
 }
 
 type Block struct {
@@ -259,14 +285,29 @@ type Block struct {
 	Start    Pos
 	End      Pos
 	NumStmts int
+	Function *Function
 }
 
 func AddCoverMeta(md Metadata) bool {
 	allCoverprofileMapMu.Lock()
+	funcMap := make(map[string]*Function)
+	funcNames := make([]string, 0, len(md.Funcs))
 	for _, fn := range md.Funcs {
+		funcMap[fn.Name] = fn
+		funcNames = append(funcNames, fn.Name)
+	}
+	for _, fn := range md.Funcs {
+		for _, dep := range fn.Deps {
+			ref, exists := funcMap[dep]
+			if !exists {
+				panic(fmt.Sprintf("tobari: failed to find function reference by %s from %v", dep, funcNames))
+			}
+			fn.DepRefs = append(fn.DepRefs, ref)
+		}
 		for _, block := range fn.Blocks {
 			bid := blockID(md.FileName, block.Idx)
 			block.FileName = md.FileName
+			block.Function = fn
 
 			blockMapMu.Lock()
 			blockMap[bid] = block
@@ -294,7 +335,11 @@ func AddCoverMeta(md Metadata) bool {
 func renderMap(mode Mode, coverMap map[string]string) string {
 	b := bytes.NewBuffer([]byte(fmt.Sprintf("mode: %s\n", mode)))
 	for _, key := range allCoverprofileMapKeys {
-		_, _ = fmt.Fprint(b, coverMap[key]+"\n")
+		value, exists := coverMap[key]
+		if !exists {
+			continue
+		}
+		_, _ = fmt.Fprint(b, value+"\n")
 	}
 	return b.String()
 }
