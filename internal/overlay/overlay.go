@@ -39,7 +39,7 @@ func PGID() uint64 { return getg().parentGoid }
 		"Replace": map[string]string{
 			filepath.Join(
 				runtimePkgDir,
-				fmt.Sprintf("rumtime_%d.go", time.Now().UnixNano()),
+				fmt.Sprintf("runtime_%d.go", time.Now().UnixNano()),
 			): runtimeFile,
 		},
 	})

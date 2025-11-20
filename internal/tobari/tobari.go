@@ -2,6 +2,7 @@ package tobari
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"runtime"
@@ -149,6 +150,15 @@ func resolveCandidateFuncMap(fn *Function, fnMap map[*Function]struct{}) {
 	}
 
 	fnMap[fn] = struct{}{}
+	funcMapMu.RLock()
+	for _, dep := range fn.Deps {
+		ref, exists := funcMap[dep]
+		if !exists {
+			panic(fmt.Sprintf("tobari: failed to find function reference by %s from %v\n", dep, funcNames))
+		}
+		fn.DepRefs = append(fn.DepRefs, ref)
+	}
+	funcMapMu.RUnlock()
 	for _, ref := range fn.DepRefs {
 		resolveCandidateFuncMap(ref, fnMap)
 	}
@@ -217,6 +227,9 @@ var (
 	blockMapMu             sync.RWMutex
 	mdMu                   sync.RWMutex
 	mds                    []*Metadata
+	funcMap                = make(map[string]*Function)
+	funcNames              []string
+	funcMapMu              sync.RWMutex
 	allCoverprofileMap     = make(map[string]string)
 	allCoverprofileMapKeys []string
 	allCoverprofileMapMu   sync.RWMutex
@@ -276,7 +289,7 @@ type Function struct {
 	Name    string
 	Blocks  []*Block
 	Deps    []string
-	DepRefs []*Function
+	DepRefs []*Function `json:"-"`
 }
 
 type Block struct {
@@ -285,25 +298,24 @@ type Block struct {
 	Start    Pos
 	End      Pos
 	NumStmts int
-	Function *Function
+	Function *Function `json:"-"`
 }
 
-func AddCoverMeta(md Metadata) bool {
+func AddCoverMeta(s string) bool {
+	var md Metadata
+	if err := json.Unmarshal([]byte(s), &md); err != nil {
+		panic(err)
+	}
 	allCoverprofileMapMu.Lock()
-	funcMap := make(map[string]*Function)
-	funcNames := make([]string, 0, len(md.Funcs))
+
+	funcMapMu.Lock()
 	for _, fn := range md.Funcs {
 		funcMap[fn.Name] = fn
 		funcNames = append(funcNames, fn.Name)
 	}
+	funcMapMu.Unlock()
+
 	for _, fn := range md.Funcs {
-		for _, dep := range fn.Deps {
-			ref, exists := funcMap[dep]
-			if !exists {
-				panic(fmt.Sprintf("tobari: failed to find function reference by %s from %v", dep, funcNames))
-			}
-			fn.DepRefs = append(fn.DepRefs, ref)
-		}
 		for _, block := range fn.Blocks {
 			bid := blockID(md.FileName, block.Idx)
 			block.FileName = md.FileName
