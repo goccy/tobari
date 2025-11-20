@@ -125,6 +125,10 @@ func analyzeFuncDepsRecursive(targetPkg *ssa.Package, n *callgraph.Node, depMap 
 	if isHTTPPackage(path) {
 		return
 	}
+	// Using references from the google.golang.org/grpc package would include all possible candidates that are called back when an gRPC request is received, so they are excluded.
+	if isGRPCGoPackage(path) {
+		return
+	}
 	for _, out := range n.Out {
 		callee := out.Callee
 		if _, exists := seenMap[callee]; exists {
@@ -154,4 +158,8 @@ func isRuntimePackage(pkgPath string) bool {
 
 func isHTTPPackage(pkgPath string) bool {
 	return pkgPath == "net/http"
+}
+
+func isGRPCGoPackage(pkgPath string) bool {
+	return strings.HasPrefix(pkgPath, "google.golang.org/grpc")
 }

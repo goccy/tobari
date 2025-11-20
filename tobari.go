@@ -35,15 +35,3 @@ var (
 
 	CoverWithName = tobari.CoverWithName
 )
-
-var (
-	// This function is an API used at measurement points.
-	// It is used to register a function that retrieves the goroutine ID.
-	SetGIDFunc = tobari.SetGIDFunc
-
-	// This function is an API used at measurement points.
-	// It is used at coverage measurement points.
-	Trace = tobari.Trace
-
-	AddCoverMeta = tobari.AddCoverMeta
-)
