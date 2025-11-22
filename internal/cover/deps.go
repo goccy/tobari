@@ -72,6 +72,9 @@ func getSSAProgram(pkg, path string) (*ssa.Program, *ssa.Package, error) {
 
 	var targetPkg *ssa.Package
 	for _, ssaPkg := range ssaPkgs {
+		if ssaPkg == nil || ssaPkg.Pkg == nil {
+			continue
+		}
 		if ssaPkg.Pkg.Name() == pkg || ssaPkg.Pkg.Path() == pkg {
 			targetPkg = ssaPkg
 			break

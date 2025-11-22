@@ -146,7 +146,7 @@ func run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		return os.WriteFile("test.cover", b, 0o600)
+		return os.WriteFile("out.cover", b, 0o600)
 	}(); err != nil {
 		return err
 	}
