@@ -5,9 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"runtime"
+	"maps"
 	"sync"
 )
+
+func EnableCoverageCounting() {
+	isEnabledTraceMu.Lock()
+	isEnabledTrace = true
+	isEnabledTraceMu.Unlock()
+}
+
+func DisableCoverageCounting() {
+	isEnabledTraceMu.Lock()
+	isEnabledTrace = false
+	isEnabledTraceMu.Unlock()
+}
 
 func ClearCounters() {
 	entryMapMu.Lock()
@@ -20,15 +32,7 @@ func ClearCounters() {
 	entryMapMu.Unlock()
 }
 
-type Mode string
-
-const (
-	SetMode    Mode = "set"
-	CountMode  Mode = "count"
-	AtomicMode Mode = "atomic"
-)
-
-func CoverProfileMap(mode Mode) map[string]string {
+func CoverProfileMap(mode string) map[string]string {
 	entryMapMu.RLock()
 	defer entryMapMu.RUnlock()
 
@@ -39,7 +43,7 @@ func CoverProfileMap(mode Mode) map[string]string {
 	return ret
 }
 
-func WriteCoverProfile(mode Mode, w io.Writer) {
+func WriteCoverProfile(mode string, w io.Writer) {
 	entryMapMu.RLock()
 	defer entryMapMu.RUnlock()
 
@@ -52,7 +56,7 @@ func WriteCoverProfile(mode Mode, w io.Writer) {
 	_, _ = fmt.Fprint(w, renderMap(mode, mergeMap))
 }
 
-func WriteCoverProfileByName(name string, mode Mode, w io.Writer) {
+func WriteCoverProfileByName(name, mode string, w io.Writer) {
 	entryMapMu.RLock()
 	defer entryMapMu.RUnlock()
 
@@ -65,32 +69,48 @@ func WriteCoverProfileByName(name string, mode Mode, w io.Writer) {
 	}
 }
 
-func Cover(fn func()) {
-	cover("", fn)
-}
+func WriteAllCoverProfile(mode string, w io.Writer) {
+	gMapMu.RLock()
+	defer gMapMu.RUnlock()
 
-func CoverWithName(name string, fn func()) {
-	cover(name, fn)
-}
+	blockToCountMap := make(map[string]int)
+	for _, g := range gMap {
+		g.blockToCountMap(blockToCountMap)
+	}
 
-func cover(name string, fn func()) {
-	ch := make(chan struct{})
-	_, file, line, _ := runtime.Caller(2)
-	entryID := fmt.Sprintf("%s:%s:%d", name, file, line)
-	go func() {
-		gid := currentGID()
-		e := getEntry(entryID)
-		if e == nil {
-			e = &TraceEntry{Name: name}
-			setEntry(entryID, e)
+	newCoverprofileMap := make(map[string]string)
+	allCoverprofileMapMu.RLock()
+	maps.Copy(newCoverprofileMap, allCoverprofileMap)
+	allCoverprofileMapMu.RUnlock()
+
+	for bid, count := range blockToCountMap {
+		block := getBlock(bid)
+		if block == nil {
+			continue
 		}
-		root := newTraceG(gid)
-		e.Roots = append(e.Roots, root)
-		setG(gid, root)
-		fn()
-		ch <- struct{}{}
-	}()
-	<-ch
+		newCoverprofileMap[bid] = fmt.Sprintf(
+			"%s:%d.%d,%d.%d %d %d",
+			block.FileName,
+			block.Start.Line, block.Start.Col,
+			block.End.Line, block.End.Col,
+			block.NumStmts,
+			count,
+		)
+	}
+
+	_, _ = fmt.Fprint(w, renderMap(mode, newCoverprofileMap))
+}
+
+func Cover(name, entryID string) {
+	gid := currentGID()
+	e := getEntry(entryID)
+	if e == nil {
+		e = &TraceEntry{Name: name}
+		setEntry(entryID, e)
+	}
+	root := newTraceG(gid)
+	e.Roots = append(e.Roots, root)
+	setG(gid, root)
 }
 
 type Pos struct {
@@ -217,6 +237,8 @@ func (g *TraceG) blockToCountMap(blockToCountMap map[string]int) {
 }
 
 var (
+	isEnabledTraceMu       sync.RWMutex
+	isEnabledTrace         = true
 	gidFnOnce              sync.Once
 	gidFn                  func() uint64
 	entryMap               = make(map[string]*TraceEntry)
@@ -269,6 +291,13 @@ func getBlock(blockID string) *Block {
 }
 
 func Trace(fileName string, pgid, gid uint64, blockIdx, startLine, endLine, startCol, endCol, numStmts int) {
+	isEnabledTraceMu.RLock()
+	if !isEnabledTrace {
+		isEnabledTraceMu.RUnlock()
+		return
+	}
+	isEnabledTraceMu.RUnlock()
+
 	g := getG(gid)
 	if g == nil {
 		g = newTraceG(gid)
@@ -344,7 +373,7 @@ func AddCoverMeta(s string) bool {
 	return true
 }
 
-func renderMap(mode Mode, coverMap map[string]string) string {
+func renderMap(mode string, coverMap map[string]string) string {
 	b := bytes.NewBuffer([]byte(fmt.Sprintf("mode: %s\n", mode)))
 	for _, key := range allCoverprofileMapKeys {
 		value, exists := coverMap[key]

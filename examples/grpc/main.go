@@ -87,7 +87,7 @@ func run(ctx context.Context) error {
 	}
 	fmt.Println(res.GetMessage())
 
-	f, err := os.Create("grpc.cover")
+	f, err := os.Create("out.cover")
 	if err != nil {
 		return err
 	}
