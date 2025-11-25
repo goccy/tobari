@@ -1,6 +1,7 @@
 package cover
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -66,6 +67,15 @@ func getSSAProgram(pkg, path string) (*ssa.Program, *ssa.Package, error) {
 	pkgs, err := packages.Load(cfg, ".")
 	if err != nil {
 		return nil, nil, err
+	}
+	var pkgErrs []error
+	for _, pkg := range pkgs {
+		for _, err := range pkg.Errors {
+			pkgErrs = append(pkgErrs, err)
+		}
+	}
+	if len(pkgErrs) != 0 {
+		return nil, nil, errors.Join(pkgErrs...)
 	}
 
 	prog, ssaPkgs := ssautil.AllPackages(pkgs, 0)
