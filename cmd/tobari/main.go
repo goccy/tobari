@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -43,7 +44,11 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-
+	if toolName == "vet" {
+		if err := replaceVetCfgIfNeeded(toolArgs); err != nil {
+			return err
+		}
+	}
 	if toolName != "cover" || isCoverVOption(toolArgs) || containsSelfPackageFile(toolArgs) {
 		runCommand(toolPath, toolArgs)
 		if err := saveArchiveFilePathIfRuntimePkgCompilation(toolName, toolArgs); err != nil {
@@ -63,11 +68,69 @@ func filterCoveragecfg(args []string) ([]string, error) {
 			if err := addRuntimePkgIfNeeded(detectImportcfgPath(coveragecfgPath)); err != nil {
 				return nil, err
 			}
+			if err := saveCoveragecfgDir(coveragecfgPath); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		ret = append(ret, arg)
 	}
 	return ret, nil
+}
+
+func replaceVetCfgIfNeeded(args []string) error {
+	for _, arg := range args {
+		if strings.HasSuffix(arg, "vet.cfg") {
+			path, err := realVetCfgPath(arg)
+			if err != nil {
+				// ignore if can't find vet.cfg path.
+				return nil
+			}
+			vetcfg, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			var m map[string]any
+			if err := json.Unmarshal(vetcfg, &m); err != nil {
+				return err
+			}
+			importMap, exists := m["ImportMap"]
+			if !exists {
+				return fmt.Errorf("failed to get ImportMap section from vet.cfg: %q", vetcfg)
+			}
+			typedImportMap, ok := importMap.(map[string]any)
+			if !ok {
+				return fmt.Errorf("failed to get ImportMap as map[string]string type: %q", vetcfg)
+			}
+			typedImportMap["runtime"] = "runtime"
+			typedImportMap["unsafe"] = "unsafe"
+
+			pkgFileMap, exists := m["PackageFile"]
+			if !exists {
+				return fmt.Errorf("failed to get PackageFile section from vet.cfg: %q", vetcfg)
+			}
+			typedPkgFileMap, ok := pkgFileMap.(map[string]any)
+			if !ok {
+				return fmt.Errorf("failed to get PackageFile as map[string]string type: %q", vetcfg)
+			}
+			if _, exists := typedPkgFileMap["runtime"]; !exists {
+				archiveFilePath, err := os.ReadFile(runtimePkgArchiveFilePath())
+				if err != nil {
+					return fmt.Errorf("failed to read runtime package archive file path: %w", err)
+				}
+				typedPkgFileMap["runtime"] = string(archiveFilePath)
+			}
+
+			b, err := json.Marshal(m)
+			if err != nil {
+				return fmt.Errorf("failed to encode vet.cfg: %w", err)
+			}
+			if err := os.WriteFile(path, b, 0o600); err != nil {
+				return fmt.Errorf("failed to rewrite vet.cfg: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 // Normally, the path in the importcfg file uses the "$WORK" variable.
@@ -150,6 +213,27 @@ func saveArchiveFilePathIfRuntimePkgCompilation(toolName string, toolArgs []stri
 	}
 	if err := os.WriteFile(runtimePkgArchiveFilePath(), []byte(archiveFilePath), 0o600); err != nil {
 		return fmt.Errorf("failed to create runtime package archive file path: %w", err)
+	}
+	return nil
+}
+
+func realVetCfgPath(relVetCfgPath string) (string, error) {
+	dirName := filepath.Base(filepath.Dir(relVetCfgPath))
+	f, err := os.ReadFile(filepath.Join(tobariRoot(), dirName))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(strings.TrimSpace(string(f)), "vet.cfg"), nil
+}
+
+func saveCoveragecfgDir(coveragecfgPath string) error {
+	if err := os.MkdirAll(tobariRoot(), 0o755); err != nil {
+		return fmt.Errorf("failed to create tobari root directory: %w", err)
+	}
+	dir := filepath.Dir(coveragecfgPath)
+	dirName := filepath.Base(dir)
+	if err := os.WriteFile(filepath.Join(tobariRoot(), dirName), []byte(dir), 0o600); err != nil {
+		return fmt.Errorf("failed to create coveragecfg path file: %s: %w", filepath.Join(tobariRoot(), dirName), err)
 	}
 	return nil
 }
