@@ -41,9 +41,19 @@ func Run(ctx context.Context, args []string) error {
 		return err
 	}
 	pkgName := file.Name.String()
-	depMap, err := createFunctionDependencyMap(pkgName, inputFiles[0])
-	if err != nil {
-		return err
+
+	var depMap *FunctionDependency
+
+	// When using "go test", it eventually invokes go tool cover with the `-mode testmain` flag,
+	// but the target files in this case are temporary files written under the $WORK directory.
+	// As a result, there is no go.mod file present, and the files cannot be built correctly.
+	// Consequently, a dependency map cannot be created, so the generation process is skipped altogether.
+	if opt.mode != "testmain" {
+		dep, err := createFunctionDependencyMap(pkgName, inputFiles[0])
+		if err != nil {
+			return err
+		}
+		depMap = dep
 	}
 	if len(inputFiles) == 1 && opt.output != "" {
 		if err := annotateFile(depMap, inputFiles[0], opt.output, opt.mode); err != nil {
@@ -286,6 +296,10 @@ var _ = %s_AddCoverMeta(%q)
 func (f *File) renderMetadata() (string, error) {
 	funcs := make([]*tobari.Function, 0, len(f.funcs))
 	for _, fn := range f.funcs {
+		// When "-mod testmain" is specified, funcDep becomes nil, so the process is skipped.
+		if f.funcDep == nil {
+			continue
+		}
 		fqdn := f.normalizeFunctionFQDN(fn.name, f.funcDep.PkgPath)
 		depNames := make([]string, 0, len(f.funcDep.DepMap))
 		for name := range f.funcDep.DepMap {
