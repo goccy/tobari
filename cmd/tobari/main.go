@@ -68,7 +68,7 @@ func filterCoveragecfg(args []string) ([]string, error) {
 			if err := addRuntimePkgIfNeeded(detectImportcfgPath(coveragecfgPath)); err != nil {
 				return nil, err
 			}
-			if err := saveCoveragecfgDir(coveragecfgPath); err != nil {
+			if err := writeCoveragecfgDir(filepath.Dir(coveragecfgPath)); err != nil {
 				return nil, err
 			}
 			continue
@@ -81,12 +81,13 @@ func filterCoveragecfg(args []string) ([]string, error) {
 func replaceVetCfgIfNeeded(args []string) error {
 	for _, arg := range args {
 		if strings.HasSuffix(arg, "vet.cfg") {
-			path, err := realVetCfgPath(arg)
+			coveragecfgDir, err := readCoveragecfgDir()
 			if err != nil {
 				// ignore if can't find vet.cfg path.
 				return nil
 			}
-			vetcfg, err := os.ReadFile(path)
+			vetcfgPath := filepath.Join(coveragecfgDir, "vet.cfg")
+			vetcfg, err := os.ReadFile(vetcfgPath)
 			if err != nil {
 				return err
 			}
@@ -114,9 +115,9 @@ func replaceVetCfgIfNeeded(args []string) error {
 				return fmt.Errorf("failed to get PackageFile as map[string]string type: %q", vetcfg)
 			}
 			if _, exists := typedPkgFileMap["runtime"]; !exists {
-				archiveFilePath, err := os.ReadFile(runtimePkgArchiveFilePath())
+				archiveFilePath, err := readRuntimePkgArchiveFilePath()
 				if err != nil {
-					return fmt.Errorf("failed to read runtime package archive file path: %w", err)
+					return err
 				}
 				typedPkgFileMap["runtime"] = string(archiveFilePath)
 			}
@@ -125,7 +126,7 @@ func replaceVetCfgIfNeeded(args []string) error {
 			if err != nil {
 				return fmt.Errorf("failed to encode vet.cfg: %w", err)
 			}
-			if err := os.WriteFile(path, b, 0o600); err != nil {
+			if err := os.WriteFile(vetcfgPath, b, 0o600); err != nil {
 				return fmt.Errorf("failed to rewrite vet.cfg: %w", err)
 			}
 		}
@@ -157,7 +158,7 @@ func addRuntimePkgIfNeeded(importcfgPath string) error {
 		// importcfg already has runtime package definition.
 		return nil
 	}
-	archiveFilePath, err := os.ReadFile(runtimePkgArchiveFilePath())
+	archiveFilePath, err := readRuntimePkgArchiveFilePath()
 	if err != nil {
 		return fmt.Errorf("failed to read runtime package archive file path: %w", err)
 	}
@@ -167,14 +168,6 @@ func addRuntimePkgIfNeeded(importcfgPath string) error {
 		return fmt.Errorf("failed to overwrite importcfg: %w", err)
 	}
 	return nil
-}
-
-func tobariRoot() string {
-	return filepath.Join(os.TempDir(), "tobari")
-}
-
-func runtimePkgArchiveFilePath() string {
-	return filepath.Join(tobariRoot(), "runtime_pkg_archive_path.txt")
 }
 
 func isCoverVOption(args []string) bool {
@@ -208,32 +201,8 @@ func saveArchiveFilePathIfRuntimePkgCompilation(toolName string, toolArgs []stri
 		return nil
 	}
 
-	if err := os.MkdirAll(tobariRoot(), 0o755); err != nil {
-		return fmt.Errorf("failed to create tobari root directory: %w", err)
-	}
-	if err := os.WriteFile(runtimePkgArchiveFilePath(), []byte(archiveFilePath), 0o600); err != nil {
-		return fmt.Errorf("failed to create runtime package archive file path: %w", err)
-	}
-	return nil
-}
-
-func realVetCfgPath(relVetCfgPath string) (string, error) {
-	dirName := filepath.Base(filepath.Dir(relVetCfgPath))
-	f, err := os.ReadFile(filepath.Join(tobariRoot(), dirName))
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(strings.TrimSpace(string(f)), "vet.cfg"), nil
-}
-
-func saveCoveragecfgDir(coveragecfgPath string) error {
-	if err := os.MkdirAll(tobariRoot(), 0o755); err != nil {
-		return fmt.Errorf("failed to create tobari root directory: %w", err)
-	}
-	dir := filepath.Dir(coveragecfgPath)
-	dirName := filepath.Base(dir)
-	if err := os.WriteFile(filepath.Join(tobariRoot(), dirName), []byte(dir), 0o600); err != nil {
-		return fmt.Errorf("failed to create coveragecfg path file: %s: %w", filepath.Join(tobariRoot(), dirName), err)
+	if err := writeRuntimePkgArchiveFilePath([]byte(archiveFilePath)); err != nil {
+		return err
 	}
 	return nil
 }
@@ -265,4 +234,60 @@ func runCommand(bin string, args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
+}
+
+func readRuntimePkgArchiveFilePath() (string, error) {
+	f, err := os.ReadFile(runtimePkgArchiveFilePath())
+	if err != nil {
+		return "", fmt.Errorf("failed to read runtime package archive file path from %s: %w", runtimePkgArchiveFilePath(), err)
+	}
+	return strings.TrimSpace(string(f)), nil
+}
+
+func writeRuntimePkgArchiveFilePath(b []byte) error {
+	if err := os.MkdirAll(tobariRoot(), 0o755); err != nil {
+		return fmt.Errorf("failed to create tobari root directory: %w", err)
+	}
+	if err := os.WriteFile(runtimePkgArchiveFilePath(), b, 0o600); err != nil {
+		return fmt.Errorf("failed to create runtime package archive file path %s: %w", runtimePkgArchiveFilePath(), err)
+	}
+	return nil
+}
+
+func runtimePkgArchiveFilePath() string {
+	return filepath.Join(tobariRoot(), fmt.Sprintf("runtime_pkg_archive_path_%s.txt", buildID()))
+}
+
+func readCoveragecfgDir() (string, error) {
+	f, err := os.ReadFile(coveragecfgDir())
+	if err != nil {
+		return "", fmt.Errorf("failed to read coveragecfg directory from %s: %w", coveragecfgDir(), err)
+	}
+	return strings.TrimSpace(string(f)), nil
+}
+
+func writeCoveragecfgDir(dir string) error {
+	if err := os.MkdirAll(tobariRoot(), 0o755); err != nil {
+		return fmt.Errorf("failed to create tobari root directory: %w", err)
+	}
+	if err := os.WriteFile(coveragecfgDir(), []byte(dir), 0o600); err != nil {
+		return fmt.Errorf("failed to create %s: %w", coveragecfgDir(), err)
+	}
+	return nil
+}
+
+func coveragecfgDir() string {
+	return filepath.Join(tobariRoot(), fmt.Sprintf("coveragecfg_dir_%s.txt", buildID()))
+}
+
+func tobariRoot() string {
+	return filepath.Join(os.TempDir(), "tobari")
+}
+
+// buildID returns a unique ID for each "go build" execution.
+func buildID() string {
+	// The "go tool" command is invoked by "go build",
+	// so its parent process ID becomes the ID of the "go build" process.
+	// In other words, it can be used as a unique ID for each "go build" execution.
+	return fmt.Sprint(os.Getppid())
 }
