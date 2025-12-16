@@ -1,56 +1,217 @@
 package overlay
 
 import (
+	"bytes"
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"text/template"
 	"time"
 )
 
 func Create(ctx context.Context) (string, error) {
-	src := []byte(`
-package runtime
-
-func GID()  uint64 { return getg().goid }
-func PGID() uint64 { return getg().parentGoid }
-`)
-
-	root := filepath.Join(os.TempDir(), "tobari")
-	ver, err := goVersion(ctx)
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(filepath.Join(root, ver), 0o755); err != nil {
-		return "", err
-	}
-	runtimeFile := filepath.Join(root, ver, "runtime.go")
-	if err := os.WriteFile(runtimeFile, src, 0o600); err != nil {
-		return "", err
-	}
-	runtimePkgDir, err := pkgPath(ctx, "runtime")
-	if err != nil {
-		return "", err
-	}
-	b, err := json.Marshal(map[string]interface{}{
-		"Replace": map[string]string{
-			filepath.Join(
-				runtimePkgDir,
-				fmt.Sprintf("runtime_%d.go", time.Now().UnixNano()),
-			): runtimeFile,
+	overlay, err := createOverlay(ctx, []*Definition{
+		{
+			PkgPath: "runtime",
+			Functions: []*Function{
+				{Name: "coverage_getCovCounterList"},
+			},
+			Template: "runtime.go.tmpl",
+		},
+		{
+			PkgPath: "testing",
+			Functions: []*Function{
+				{
+					Name: "Run",
+					Method: &Method{
+						Type:    "T",
+						Name:    "t",
+						Pointer: true,
+					},
+				},
+			},
+			Template: "testing.go.tmpl",
+		},
+		{
+			PkgPath:   "testing/internal/testdeps",
+			Functions: []*Function{{Name: "coverTearDown"}},
+			Template:  "testdeps.go.tmpl",
 		},
 	})
 	if err != nil {
 		return "", err
 	}
-	overlayPath := filepath.Join(root, ver, "overlay.json")
-	if err := os.WriteFile(overlayPath, b, 0o600); err != nil {
+	b, err := json.Marshal(overlay)
+	if err != nil {
 		return "", err
 	}
-	return overlayPath, nil
+	if err := os.WriteFile(overlay.path, b, 0o600); err != nil {
+		return "", err
+	}
+	return overlay.path, nil
+}
+
+type Overlay struct {
+	Replace map[string]string
+	path    string
+}
+
+//go:embed templates/*.tmpl
+var tmpls embed.FS
+
+func createOverlay(ctx context.Context, defs []*Definition) (*Overlay, error) {
+	root, err := OverlayRootDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+	id := fmt.Sprint(time.Now().UnixNano())
+	if err := os.MkdirAll(filepath.Join(root, id), 0o755); err != nil {
+		return nil, err
+	}
+
+	overlayMap := make(map[string]string)
+	for _, def := range defs {
+		if err := os.MkdirAll(filepath.Join(root, id, def.PkgPath), 0o755); err != nil {
+			return nil, err
+		}
+		pkgPath, err := pkgPath(ctx, def.PkgPath)
+		if err != nil {
+			return nil, err
+		}
+		pkgFiles, err := pkgGoFiles(ctx, pkgPath)
+		if err != nil {
+			return nil, err
+		}
+		pkgScopedReplacedNameMap := make(map[string]string)
+		for _, pkgFile := range pkgFiles {
+			src, err := os.ReadFile(pkgFile)
+			if err != nil {
+				continue
+			}
+
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, pkgFile, src, 0)
+			if err != nil {
+				continue
+			}
+
+			fileScopedReplacedNameMap := make(map[string]string)
+			for _, decl := range file.Decls {
+				funcDecl, ok := decl.(*ast.FuncDecl)
+				if !ok {
+					continue
+				}
+				fn := matchedFunc(def, funcDecl)
+				if fn == nil {
+					continue
+				}
+				newName := fn.Name + "_" + id
+				funcDecl.Name = &ast.Ident{Name: newName}
+				fileScopedReplacedNameMap[fn.Name] = newName
+				pkgScopedReplacedNameMap[fn.Name] = newName
+			}
+			if len(fileScopedReplacedNameMap) != 0 {
+				var buf bytes.Buffer
+				if err := format.Node(&buf, fset, file); err != nil {
+					return nil, fmt.Errorf("failed to format AST: %w", err)
+				}
+				tmpFile := filepath.Join(root, id, def.PkgPath, filepath.Base(pkgFile))
+				if err := os.WriteFile(tmpFile, buf.Bytes(), 0o600); err != nil {
+					return nil, err
+				}
+				overlayMap[pkgFile] = tmpFile
+			}
+		}
+		b, err := evalTemplate(def.Template, pkgScopedReplacedNameMap)
+		if err != nil {
+			return nil, err
+		}
+		tmpFile := filepath.Join(root, id, def.PkgPath, id+".go")
+		if err := os.WriteFile(tmpFile, b, 0o600); err != nil {
+			return nil, err
+		}
+		overlayMap[filepath.Join(pkgPath, id+".go")] = tmpFile
+	}
+	path, _ := OverlayPath(ctx)
+	return &Overlay{Replace: overlayMap, path: path}, nil
+}
+
+type Definition struct {
+	PkgPath   string
+	Functions []*Function
+	Template  string
+}
+
+type Function struct {
+	Name   string
+	Method *Method
+}
+
+type Method struct {
+	Type    string
+	Name    string
+	Pointer bool
+}
+
+func evalTemplate(path string, replacedNameMap map[string]string) ([]byte, error) {
+	f, err := tmpls.ReadFile(filepath.Join("templates", path))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read template: %w", err)
+	}
+	tmpl, err := template.New(path).Parse(string(f))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse template %s: %w", path, err)
+	}
+	var b bytes.Buffer
+	if err := tmpl.Execute(&b, replacedNameMap); err != nil {
+		return nil, fmt.Errorf("failed to execute template: %w", err)
+	}
+	return b.Bytes(), nil
+}
+
+func matchedFunc(def *Definition, decl *ast.FuncDecl) *Function {
+	for _, fn := range def.Functions {
+		if decl.Name.Name != fn.Name {
+			continue
+		}
+		if fn.Method != nil {
+			if decl.Recv == nil {
+				continue
+			}
+			if len(decl.Recv.List) == 0 {
+				continue
+			}
+			if fn.Method.Pointer {
+				star, ok := decl.Recv.List[0].Type.(*ast.StarExpr)
+				if !ok {
+					continue
+				}
+				ident, ok := star.X.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				if ident.Name == fn.Method.Type {
+					return fn
+				}
+			}
+		} else {
+			if decl.Recv != nil {
+				continue
+			}
+			return fn
+		}
+	}
+	return nil
 }
 
 func pkgPath(ctx context.Context, pkg string) (string, error) {
@@ -59,6 +220,26 @@ func pkgPath(ctx context.Context, pkg string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(root, "src", pkg), nil
+}
+
+func pkgGoFiles(ctx context.Context, srcPath string) ([]string, error) {
+	var ret []string
+	_ = filepath.Walk(srcPath, func(path string, info fs.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || filepath.Ext(info.Name()) != ".go" {
+			return nil
+		}
+
+		if strings.HasSuffix(info.Name(), "_test.go") {
+			return nil
+		}
+
+		ret = append(ret, path)
+		return nil
+	})
+	return ret, nil
 }
 
 func goRoot(ctx context.Context) (string, error) {

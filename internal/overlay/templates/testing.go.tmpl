@@ -1,0 +1,15 @@
+package testing
+
+import (
+	_ "unsafe"
+)
+
+//go:linkname tobari_cover github.com/goccy/tobari/internal/tobari.Cover
+func tobari_cover(name, entryID string)
+
+func (t *T) Run(name string, f func(t *T)) bool {
+	return t.{{ .Run }}(name, func(t *T) {
+		tobari_cover(t.Name(), t.Name())
+		f(t)
+	})
+}
