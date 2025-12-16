@@ -1,11 +1,14 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/goccy/tobari/internal/overlay"
 )
 
 func readRuntimePkg() (string, error) {
@@ -69,11 +72,8 @@ func buildPathWithID(id int) string {
 }
 
 func runtimePkgPath() string {
-	return filepath.Join(buildPath(), "runtime_pkg.txt")
-}
-
-func buildPath() string {
-	return buildPathWithID(buildID())
+	dir, _ := overlay.OverlayRootDir(context.Background())
+	return filepath.Join(dir, "runtime_pkg.txt")
 }
 
 // buildID returns a unique ID for each "go build" execution.
