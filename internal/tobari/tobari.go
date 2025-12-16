@@ -298,6 +298,8 @@ func Trace(fileName string, pgid, gid uint64, blockIdx, startLine, endLine, star
 	}
 	isEnabledTraceMu.RUnlock()
 
+	blockIDStr := blockID(fileName, blockIdx)
+
 	g := getG(gid)
 	if g == nil {
 		g = newTraceG(gid)
@@ -306,16 +308,20 @@ func Trace(fileName string, pgid, gid uint64, blockIdx, startLine, endLine, star
 			parent.linkG(g)
 		}
 	}
-	g.addCounter(blockID(fileName, blockIdx))
+	g.addCounter(blockIDStr)
 }
 
 type Metadata struct {
-	FileName string
-	Funcs    []*Function
+	FileName   string
+	PkgPath    string
+	PkgName    string
+	ModulePath string
+	Funcs      []*Function
 }
 
 type Function struct {
 	Name    string
+	Lit     bool
 	Blocks  []*Block
 	Deps    []string
 	DepRefs []*Function `json:"-"`
@@ -387,4 +393,60 @@ func renderMap(mode string, coverMap map[string]string) string {
 
 func blockID(fileName string, blockIdx int) string {
 	return fmt.Sprintf("%s:%d", fileName, blockIdx)
+}
+
+func EncodeMeta() ([]byte, error) {
+	mdMu.RLock()
+	defer mdMu.RUnlock()
+
+	return json.Marshal(mds)
+}
+
+type CoverageFuncCounter struct {
+	Counters []uint32
+	Len      uint64
+}
+
+func EncodeCounters() ([]byte, error) {
+	mdMu.RLock()
+	gMapMu.RLock()
+	defer mdMu.RUnlock()
+	defer gMapMu.RUnlock()
+
+	blockToCountMap := make(map[string]int)
+	for _, g := range gMap {
+		g.blockToCountMap(blockToCountMap)
+	}
+
+	var allFnCounters []CoverageFuncCounter
+	for mdIdx, md := range mds {
+		var flatCounters []uint32
+
+		// Calculate total size needed: for each function we need
+		// firstCtr + nCtrs counters, where firstCtr contains [nCtrs, pkgId+1, funcId]
+		for fnIdx, fn := range md.Funcs {
+			// Add function header at the first counter position
+			flatCounters = append(flatCounters, uint32(len(fn.Blocks))) // NumCtrsOffset = 0
+			flatCounters = append(flatCounters, uint32(mdIdx)+1)        // PkgIdOffset = 1 (use metadata index, add 1 as per Go source)
+			flatCounters = append(flatCounters, uint32(fnIdx))          // FuncIdOffset = 2 (function index in metadata)
+
+			// Add actual counter values at FirstCtrOffset onwards
+			for _, block := range fn.Blocks {
+				bid := blockID(block.FileName, block.Idx)
+				cnt := blockToCountMap[bid]
+				// For "set" mode, use 1 if counter > 0, else 0
+				var ctrVal uint32 = 0
+				if cnt > 0 {
+					ctrVal = 1
+				}
+				flatCounters = append(flatCounters, ctrVal)
+			}
+		}
+
+		allFnCounters = append(allFnCounters, CoverageFuncCounter{
+			Counters: flatCounters,
+			Len:      uint64(len(flatCounters)),
+		})
+	}
+	return json.Marshal(allFnCounters)
 }

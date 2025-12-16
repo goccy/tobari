@@ -21,8 +21,8 @@ type FunctionDependency struct {
 	DepMap  map[string][]string
 }
 
-func createFunctionDependencyMap(pkg, path string) (*FunctionDependency, error) {
-	prog, targetPkg, err := getSSAProgram(pkg, path)
+func createFunctionDependencyMap(pkgcfg *PackageConfig, path string) (*FunctionDependency, error) {
+	prog, targetPkg, err := getSSAProgram(pkgcfg, path)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +41,7 @@ func createFunctionDependencyMap(pkg, path string) (*FunctionDependency, error) 
 	}, nil
 }
 
-func getSSAProgram(pkg, path string) (*ssa.Program, *ssa.Package, error) {
+func getSSAProgram(pkgcfg *PackageConfig, path string) (*ssa.Program, *ssa.Package, error) {
 	// Since the results of the `tobari flags` are included in GOFLAGS,
 	// this would result in infinite recursion as is.
 	// Therefore, GOFLAGS is removed from the environment variables.
@@ -85,13 +85,13 @@ func getSSAProgram(pkg, path string) (*ssa.Program, *ssa.Package, error) {
 		if ssaPkg == nil || ssaPkg.Pkg == nil {
 			continue
 		}
-		if ssaPkg.Pkg.Name() == pkg || ssaPkg.Pkg.Path() == pkg {
+		if ssaPkg.Pkg.Name() == pkgcfg.PkgName || ssaPkg.Pkg.Path() == pkgcfg.PkgName {
 			targetPkg = ssaPkg
 			break
 		}
 	}
 	if targetPkg == nil {
-		return nil, nil, fmt.Errorf("failed to find target package: %s", pkg)
+		return nil, nil, fmt.Errorf("failed to find target package: %s", pkgcfg.PkgName)
 	}
 
 	prog.Build()

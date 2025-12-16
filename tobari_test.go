@@ -109,3 +109,35 @@ func TestTobari(t *testing.T) {
 		})
 	}
 }
+
+func TestZeroConfiguration(t *testing.T) {
+	ctx := t.Context()
+	tobariBin := filepath.Join(t.TempDir(), "tobari-test")
+	defer func() {
+		_ = os.RemoveAll(tobariBin)
+	}()
+
+	if out, err := exec.CommandContext(
+		ctx,
+		"go",
+		"build",
+		"-o",
+		tobariBin,
+		"./cmd/tobari",
+	).CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+	tobariFlagsOut, err := exec.CommandContext(ctx, tobariBin, "flags").CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to run tobari flags: %s: %v", string(tobariFlagsOut), err)
+	}
+	tobariFlags := strings.TrimSpace(string(tobariFlagsOut))
+	args := append(append([]string{"test"}, strings.Split(tobariFlags, " ")...), ".")
+	cmd := exec.CommandContext(ctx, "go", args...)
+	cmd.Dir = filepath.Join("testdata", "notobari")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to run test: %s: %v", string(out), err)
+	} else {
+		t.Log(string(out))
+	}
+}

@@ -1,0 +1,17 @@
+package runtime
+
+import (
+	"internal/coverage/rtcov"
+	_ "unsafe"
+)
+
+func GID() uint64  { return getg().goid }
+func PGID() uint64 { return getg().parentGoid }
+
+//go:linkname coverage_getCovCounterList internal/coverage/cfile.getCovCounterList
+func coverage_getCovCounterList() []rtcov.CovCounterBlob {
+	return getCovCounterListTobari()
+}
+
+//go:linkname getCovCounterListTobari
+func getCovCounterListTobari() []rtcov.CovCounterBlob

@@ -1,0 +1,153 @@
+package testdeps
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"unsafe"
+	_ "unsafe"
+
+	"internal/coverage"
+	"internal/coverage/encodemeta"
+	"internal/coverage/rtcov"
+	"internal/coverage/slicewriter"
+)
+
+//go:linkname coverProfileMap github.com/goccy/tobari.CoverProfileMap
+func coverProfileMap(string) map[string]string
+
+func coverTearDown(coverprofile string, gocoverdir string) (string, error) {
+	if gocoverDir := os.Getenv("GOCOVERDIR"); gocoverDir != "" {
+		m := coverProfileMap("set")
+		b, err := json.Marshal(m)
+		if err != nil {
+			return "", err
+		}
+		tobariDir := filepath.Join(gocoverDir, "tobari")
+		if err := os.MkdirAll(tobariDir, 0o755); err != nil {
+			return "", fmt.Errorf("failed to write tobari directory to %s: %w", tobariDir, err)
+		}
+		path := filepath.Join(tobariDir, "tobari.json")
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			return "", fmt.Errorf("failed to write tobari.json to %s: %w", path, err)
+		}
+	}
+	if err := setupMeta(); err != nil {
+		return "", fmt.Errorf("failed to setup metadata: %w", err)
+	}
+	return {{ .coverTearDown }}(coverprofile, gocoverdir)
+}
+
+//go:linkname tobariEncodeMeta github.com/goccy/tobari/internal/tobari.EncodeMeta
+func tobariEncodeMeta() ([]byte, error)
+
+//go:linkname tobariEncodeCounters github.com/goccy/tobari/internal/tobari.EncodeCounters
+func tobariEncodeCounters() ([]byte, error)
+
+type Metadata struct {
+	FileName   string
+	PkgPath    string
+	PkgName    string
+	ModulePath string
+	Funcs      []*Function
+}
+
+type Function struct {
+	Name   string
+	Lit    bool
+	Blocks []*Block
+}
+
+type Block struct {
+	FileName string
+	Idx      int
+	Start    Pos
+	End      Pos
+	NumStmts int
+}
+
+type Pos struct {
+	Line int
+	Col  int
+}
+
+func setupMeta() error {
+	b, err := tobariEncodeMeta()
+	if err != nil {
+		return err
+	}
+	var mds []*Metadata
+	if err := json.Unmarshal(b, &mds); err != nil {
+		return err
+	}
+	for mdIdx, md := range mds {
+		mdb, err := encodemeta.NewCoverageMetaDataBuilder(md.PkgPath, md.PkgName, md.ModulePath)
+		if err != nil {
+			return err
+		}
+		for _, fn := range md.Funcs {
+			fdesc := coverage.FuncDesc{
+				Funcname: fn.Name,
+				Srcfile:  md.FileName,
+				Lit:      fn.Lit,
+			}
+			for _, block := range fn.Blocks {
+				fdesc.Units = append(fdesc.Units, coverage.CoverableUnit{
+					StLine:  uint32(block.Start.Line),
+					StCol:   uint32(block.Start.Col),
+					EnLine:  uint32(block.End.Line),
+					EnCol:   uint32(block.End.Col),
+					NxStmts: uint32(block.NumStmts),
+				})
+			}
+			mdb.AddFunc(fdesc)
+		}
+		var sws slicewriter.WriteSeeker
+		digest, err := mdb.Emit(&sws)
+		if err != nil {
+			return fmt.Errorf("failed to emit metadata: %w", err)
+		}
+		payload := sws.BytesWritten()
+		pkgid := coverage.HardCodedPkgID(md.PkgPath)
+		cm := coverage.ParseCounterMode("set")
+		if pkgid == -1 {
+			pkgid = mdIdx
+		}
+		_ = rtcov.AddMeta(
+			unsafe.Pointer(&payload[0]),
+			uint32(len(payload)),
+			digest,
+			md.PkgPath,
+			pkgid,
+			uint8(cm),
+			uint8(coverage.CtrGranularityPerBlock),
+		)
+	}
+	return nil
+}
+
+type CoverageFuncCounter struct {
+	Counters []uint32
+	Len      uint64
+}
+
+//go:linkname getCovCounterList runtime.getCovCounterListTobari
+func getCovCounterList() []rtcov.CovCounterBlob {
+	b, err := tobariEncodeCounters()
+	if err != nil {
+		panic(err)
+	}
+	var v []CoverageFuncCounter
+	if err := json.Unmarshal(b, &v); err != nil {
+		panic(err)
+	}
+	ret := make([]rtcov.CovCounterBlob, 0, len(v))
+	for _, vv := range v {
+		ret = append(ret, rtcov.CovCounterBlob{
+			Counters: unsafe.SliceData(vv.Counters),
+			Len:      vv.Len,
+		})
+	}
+	return ret
+}
