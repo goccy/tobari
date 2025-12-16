@@ -75,18 +75,27 @@ func createApp(ver *version.Version, lang string) error {
 
 func createGoMod(path string, ver *version.Version, lang string) error {
 	f := new(modfile.File)
-	f.AddModuleStmt("tobari")
+	if err := f.AddModuleStmt("tobari"); err != nil {
+		return fmt.Errorf("failed to add module stmt: %w", err)
+	}
 	if lang != "" {
-		f.AddGoStmt(lang)
+		goVer := strings.TrimPrefix(lang, "go")
+		if err := f.AddGoStmt(goVer); err != nil {
+			return fmt.Errorf("failed to add go stmt: %w", err)
+		}
 	}
 	if ver.LocalPath != "" {
 		rel, err := filepath.Rel(path, ver.LocalPath)
 		if err != nil {
 			return fmt.Errorf("failed to create relative path from %s: %w", path, err)
 		}
-		f.AddReplace("github.com/goccy/tobari", "", rel, "")
+		if err := f.AddReplace("github.com/goccy/tobari", "", rel, ""); err != nil {
+			return fmt.Errorf("failed to add replace directive: %w", err)
+		}
 	} else {
-		f.AddRequire("github.com/goccy/tobari", ver.Ver)
+		if err := f.AddRequire("github.com/goccy/tobari", ver.Ver); err != nil {
+			return fmt.Errorf("failed to add require directive: %w", err)
+		}
 	}
 	data, err := f.Format()
 	if err != nil {

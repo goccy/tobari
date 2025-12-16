@@ -8,10 +8,7 @@ import (
 	"path/filepath"
 )
 
-var tobariCmd string
-
 func Handle(ctx context.Context, args []string) error {
-	tobariCmd = args[0]
 	toolPath := args[1]
 	toolArgs := args[2:]
 

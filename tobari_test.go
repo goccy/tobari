@@ -113,7 +113,9 @@ func TestTobari(t *testing.T) {
 func TestZeroConfiguration(t *testing.T) {
 	ctx := t.Context()
 	tobariBin := filepath.Join(t.TempDir(), "tobari-test")
-	defer os.RemoveAll(tobariBin)
+	defer func() {
+		_ = os.RemoveAll(tobariBin)
+	}()
 
 	if out, err := exec.CommandContext(
 		ctx,

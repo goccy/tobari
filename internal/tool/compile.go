@@ -8,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/goccy/tobari/internal/overlay"
 )
 
 func handleCompile(ctx context.Context, toolPath string, args []string) error {
@@ -140,12 +138,7 @@ func saveRuntimePkgIfPresent(args []string) error {
 	var (
 		pkgPath      string
 		isRuntimePkg bool
-		overlayID    string
 	)
-	overlayRoot, err := overlay.OverlayRootDir(context.Background())
-	if err != nil {
-		return err
-	}
 	for i := 0; i < len(args); i++ {
 		opt := args[i]
 		switch opt {
@@ -158,23 +151,12 @@ func saveRuntimePkgIfPresent(args []string) error {
 				pkgPath = args[i+1]
 			}
 		}
-		if strings.HasPrefix(args[i], overlayRoot) {
-			overlayFile := strings.TrimPrefix(args[i], overlayRoot)
-			parts := strings.Split(overlayFile, string(filepath.Separator))
-			if len(parts) <= 1 {
-				return fmt.Errorf("unexpected overlay file path: %s", overlayFile)
-			}
-			overlayID = parts[1]
-		}
 	}
-	if !isRuntimePkg || pkgPath == "" || overlayID == "" {
+	if !isRuntimePkg || pkgPath == "" {
 		return nil
 	}
 
 	if err := writeRuntimePkg([]byte(pkgPath)); err != nil {
-		return err
-	}
-	if err := writeOverlayID([]byte(overlayID)); err != nil {
 		return err
 	}
 	return nil

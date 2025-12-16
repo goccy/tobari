@@ -27,25 +27,6 @@ func writeRuntimePkg(b []byte) error {
 	return nil
 }
 
-func readOverlayID() (string, error) {
-	f, err := os.ReadFile(overlayIDPath())
-	if err != nil {
-		return "", fmt.Errorf("failed to read overlayID file path from %s: %w", overlayIDPath(), err)
-	}
-	return strings.TrimSpace(string(f)), nil
-}
-
-func writeOverlayID(b []byte) error {
-	p := overlayIDPath()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(p, b, 0o600); err != nil {
-		return fmt.Errorf("failed to save overlay id %s: %w", p, err)
-	}
-	return nil
-}
-
 func readTobariPkgs(id int) map[string]string {
 	f, err := os.ReadFile(tobariPkgPathWithID(id))
 	if err != nil {
@@ -89,10 +70,6 @@ func buildPathWithID(id int) string {
 
 func runtimePkgPath() string {
 	return filepath.Join(buildPath(), "runtime_pkg.txt")
-}
-
-func overlayIDPath() string {
-	return filepath.Join(buildPath(), "overlay_id.txt")
 }
 
 func buildPath() string {
