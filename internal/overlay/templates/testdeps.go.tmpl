@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"unsafe"
-	_ "unsafe"
 
 	"internal/coverage"
 	"internal/coverage/encodemeta"
@@ -18,20 +17,19 @@ import (
 func coverProfileMap(string) map[string]string
 
 func coverTearDown(coverprofile string, gocoverdir string) (string, error) {
-	if gocoverDir := os.Getenv("GOCOVERDIR"); gocoverDir != "" {
-		m := coverProfileMap("set")
-		b, err := json.Marshal(m)
-		if err != nil {
-			return "", err
-		}
-		tobariDir := filepath.Join(gocoverDir, "tobari")
-		if err := os.MkdirAll(tobariDir, 0o755); err != nil {
-			return "", fmt.Errorf("failed to write tobari directory to %s: %w", tobariDir, err)
-		}
-		path := filepath.Join(tobariDir, "tobari.json")
-		if err := os.WriteFile(path, b, 0o600); err != nil {
-			return "", fmt.Errorf("failed to write tobari.json to %s: %w", path, err)
-		}
+	gocoverDir := os.Getenv("GOCOVERDIR")
+	m := coverProfileMap("set")
+	b, err := json.Marshal(m)
+	if err != nil {
+		return "", err
+	}
+	tobariDir := filepath.Join(gocoverDir, "tobari")
+	if err := os.MkdirAll(tobariDir, 0o755); err != nil {
+		return "", fmt.Errorf("failed to write tobari directory to %s: %w", tobariDir, err)
+	}
+	path := filepath.Join(tobariDir, "tobari.json")
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		return "", fmt.Errorf("failed to write tobari.json to %s: %w", path, err)
 	}
 	if err := setupMeta(); err != nil {
 		return "", fmt.Errorf("failed to setup metadata: %w", err)
