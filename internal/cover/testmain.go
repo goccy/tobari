@@ -37,10 +37,16 @@ func addTobariImportToTestMain(inputPath string) error {
 func addTobariImportStmt(file *ast.File) {
 	if len(file.Decls) != 0 {
 		if genDecl, ok := file.Decls[0].(*ast.GenDecl); ok && genDecl.Tok == token.IMPORT {
-			genDecl.Specs = append(genDecl.Specs, &ast.ImportSpec{
-				Name: &ast.Ident{Name: "_"},
-				Path: &ast.BasicLit{Kind: token.STRING, Value: `"github.com/goccy/tobari"`},
-			})
+			genDecl.Specs = append(genDecl.Specs,
+				&ast.ImportSpec{
+					Name: &ast.Ident{Name: "_"},
+					Path: &ast.BasicLit{Kind: token.STRING, Value: `"github.com/goccy/tobari"`},
+				},
+				&ast.ImportSpec{
+					Name: &ast.Ident{Name: "_"},
+					Path: &ast.BasicLit{Kind: token.STRING, Value: `"runtime"`},
+				},
+			)
 			return
 		}
 	}
@@ -51,6 +57,10 @@ func addTobariImportStmt(file *ast.File) {
 				&ast.ImportSpec{
 					Name: &ast.Ident{Name: "_"},
 					Path: &ast.BasicLit{Kind: token.STRING, Value: `"github.com/goccy/tobari"`},
+				},
+				&ast.ImportSpec{
+					Name: &ast.Ident{Name: "_"},
+					Path: &ast.BasicLit{Kind: token.STRING, Value: `"runtime"`},
 				},
 			},
 		},

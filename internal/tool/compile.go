@@ -91,46 +91,11 @@ func filterCoveragecfg(args []string) ([]string, error) {
 	ret := make([]string, 0, len(args))
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "-coveragecfg=") {
-			coveragecfgPath := strings.TrimPrefix(arg, "-coveragecfg=")
-			if err := addRuntimePkgIfNeeded(detectImportcfgPath(coveragecfgPath)); err != nil {
-				return nil, err
-			}
 			continue
 		}
 		ret = append(ret, arg)
 	}
 	return ret, nil
-}
-
-func detectImportcfgPath(coveragecfgPath string) string {
-	return filepath.Join(filepath.Dir(coveragecfgPath), "importcfg")
-}
-
-// In Tobari, the AST of the files targeted for coverage measurement is manipulated,
-// and the GID() and PGID() functions—dynamically added to the runtime package using the overlay option—are used to measure the Goroutine ID.
-// However, if the original file being measured does not import the runtime package, the importcfg file will not contain an archive file path entry for the runtime package,
-// resulting in a compilation failure due to unresolved references to the runtime package.
-// To prevent this, a reference to the runtime package is dynamically added to the importcfg file.
-// Since the runtime package is always built in advance, its package file path is stored and used to resolve the reference.
-func addRuntimePkgIfNeeded(importcfgPath string) error {
-	importcfg, err := os.ReadFile(importcfgPath)
-	if err != nil {
-		return fmt.Errorf("failed to read importcfg path %s: %w", importcfgPath, err)
-	}
-	if strings.Contains(string(importcfg), "packagefile runtime=") {
-		// importcfg already has runtime package definition.
-		return nil
-	}
-	archiveFilePath, err := readRuntimePkg()
-	if err != nil {
-		return fmt.Errorf("failed to read runtime package archive file path: %w", err)
-	}
-	runtimePkgDef := fmt.Sprintf("packagefile runtime=%s", string(archiveFilePath))
-	content := string(importcfg) + "\n" + runtimePkgDef
-	if err := os.WriteFile(importcfgPath, []byte(content), 0o600); err != nil {
-		return fmt.Errorf("failed to overwrite importcfg: %w", err)
-	}
-	return nil
 }
 
 // The path from when the runtime package was built is saved and later used when adding it to the importcfg.

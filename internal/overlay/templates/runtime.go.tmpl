@@ -5,7 +5,10 @@ import (
 	_ "unsafe"
 )
 
+//go:linkname GID
 func GID() uint64  { return getg().goid }
+
+//go:linkname PGID
 func PGID() uint64 { return getg().parentGoid }
 
 //go:linkname coverage_getCovCounterList internal/coverage/cfile.getCovCounterList

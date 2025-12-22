@@ -154,5 +154,6 @@ func appPath(ver *version.Version) string {
 		runtime.Version(),
 		runtime.GOARCH,
 		ver.ID(),
+		fmt.Sprint(os.Getpid()),
 	)
 }

@@ -241,18 +241,18 @@ var (
 	isEnabledTrace         = true
 	gidFnOnce              sync.Once
 	gidFn                  func() uint64
-	entryMap               = make(map[string]*TraceEntry)
+	entryMap               map[string]*TraceEntry
 	entryMapMu             sync.RWMutex
-	gMap                   = make(map[uint64]*TraceG)
+	gMap                   map[uint64]*TraceG
 	gMapMu                 sync.RWMutex
-	blockMap               = make(map[string]*Block)
+	blockMap               map[string]*Block
 	blockMapMu             sync.RWMutex
 	mdMu                   sync.RWMutex
 	mds                    []*Metadata
-	funcMap                = make(map[string]*Function)
+	funcMap                map[string]*Function
 	funcNames              []string
 	funcMapMu              sync.RWMutex
-	allCoverprofileMap     = make(map[string]string)
+	allCoverprofileMap     map[string]string
 	allCoverprofileMapKeys []string
 	allCoverprofileMapMu   sync.RWMutex
 )
@@ -336,7 +336,35 @@ type Block struct {
 	Function *Function `json:"-"`
 }
 
+var initOnce sync.Once
+
+func init() {
+	initMap()
+}
+
+func initMap() {
+	initOnce.Do(func() {
+		entryMapMu.Lock()
+		gMapMu.Lock()
+		blockMapMu.Lock()
+		funcMapMu.Lock()
+		allCoverprofileMapMu.Lock()
+		defer entryMapMu.Unlock()
+		defer gMapMu.Unlock()
+		defer blockMapMu.Unlock()
+		defer funcMapMu.Unlock()
+		defer allCoverprofileMapMu.Unlock()
+
+		entryMap = make(map[string]*TraceEntry)
+		gMap = make(map[uint64]*TraceG)
+		blockMap = make(map[string]*Block)
+		funcMap = make(map[string]*Function)
+		allCoverprofileMap = make(map[string]string)
+	})
+}
+
 func AddCoverMeta(s string) bool {
+	initMap()
 	var md Metadata
 	if err := json.Unmarshal([]byte(s), &md); err != nil {
 		panic(err)

@@ -53,6 +53,11 @@ func Run(ctx context.Context, args []string) error {
 			PkgName: file.Name.String(),
 		}
 	}
+	if pkgcfg.EmitMetaFile != "" {
+		if err := os.WriteFile(pkgcfg.EmitMetaFile, nil, 0o600); err != nil {
+			return fmt.Errorf("failed to write metadata file to %s: %w", pkgcfg.EmitMetaFile, err)
+		}
+	}
 
 	var depMap *FunctionDependency
 
@@ -164,9 +169,14 @@ func createCovervars(pkgcfg *PackageConfig, pkgcfgPath string) error {
 package %[1]s
 
 import (
-   "runtime"
    _ "unsafe"
 )
+
+//go:linkname %[2]s_GID runtime.GID
+func %[2]s_GID() uint64
+
+//go:linkname %[2]s_PGID runtime.PGID
+func %[2]s_PGID() uint64
 
 //go:linkname %[2]s_Trace github.com/goccy/tobari/internal/tobari.Trace
 func %[2]s_Trace(string, uint64, uint64, int, int, int, int, int, int)
@@ -177,7 +187,7 @@ func %[2]s_SetGIDFunc(func() uint64) bool
 //go:linkname %[2]s_AddCoverMeta github.com/goccy/tobari/internal/tobari.AddCoverMeta
 func %[2]s_AddCoverMeta(string) bool
 
-var _ = %[2]s_SetGIDFunc(func() uint64 { return runtime.GID() })
+var _ = %[2]s_SetGIDFunc(func() uint64 { return %[2]s_GID() })
 `, pkgcfg.PkgName, tobariPkg)
 		if err := os.WriteFile(covervarsPath, []byte(src), 0o600); err != nil {
 			return err
@@ -264,16 +274,17 @@ func addTracePoint(pkgcfg *PackageConfig, dep *FunctionDependency, src, mode str
 }
 
 type File struct {
-	fset    *token.FileSet
-	name    string
-	mode    string
-	astFile *ast.File
-	curFunc *Function
-	funcs   []*Function
-	content []byte
-	edit    *Buffer
-	funcDep *FunctionDependency
-	pkgcfg  *PackageConfig
+	fset                *token.FileSet
+	name                string
+	mode                string
+	astFile             *ast.File
+	curFunc             *Function
+	funcs               []*Function
+	content             []byte
+	edit                *Buffer
+	funcDep             *FunctionDependency
+	pkgcfg              *PackageConfig
+	anonymGlobalFuncIdx int
 }
 
 func (f *File) nextBlockIndex() int {
@@ -304,16 +315,6 @@ func (f *Function) addBlock(b *tobari.Block) {
 	f.blocks = append(f.blocks, b)
 }
 
-func (f *Function) createAnonymFuncName() string {
-	if f == nil {
-		return ""
-	}
-
-	defer func() { f.anonymFuncIdx++ }()
-
-	return fmt.Sprintf("%s$%d", f.name, f.anonymFuncIdx)
-}
-
 func addTracePointWithContent(pkgcfg *PackageConfig, dep *FunctionDependency, filename string, content []byte, mode string) ([]byte, error) {
 	fset := token.NewFileSet()
 	parsedFile, err := parser.ParseFile(fset, filename, content, parser.ParseComments)
@@ -322,18 +323,16 @@ func addTracePointWithContent(pkgcfg *PackageConfig, dep *FunctionDependency, fi
 	}
 
 	file := &File{
-		fset:    fset,
-		mode:    mode,
-		name:    filename,
-		content: content,
-		edit:    NewBuffer(content),
-		astFile: parsedFile,
-		funcDep: dep,
-		pkgcfg:  pkgcfg,
+		fset:                fset,
+		mode:                mode,
+		name:                filename,
+		content:             content,
+		edit:                NewBuffer(content),
+		astFile:             parsedFile,
+		funcDep:             dep,
+		pkgcfg:              pkgcfg,
+		anonymGlobalFuncIdx: 1,
 	}
-
-	// Add import of github.com/goccy/tobari
-	file.addImport()
 
 	// Walk the AST and instrument code
 	ast.Walk(file, file.astFile)
@@ -346,8 +345,7 @@ func addTracePointWithContent(pkgcfg *PackageConfig, dep *FunctionDependency, fi
 }
 
 const (
-	tobariPkg  = "github_com_goccy_tobari"
-	runtimePkg = "github_com_goccy_tobari_runtime"
+	tobariPkg = "github_com_goccy_tobari"
 )
 
 func (f *File) renderFooter() (string, error) {
@@ -408,18 +406,6 @@ func (f *File) normalizeFunctionFQDN(fname, pkgPath string) string {
 		return fmt.Sprintf("(*%s.%s).%s", pkgPath, parts[0][1:], parts[1])
 	}
 	return fmt.Sprintf("(%s.%s).%s", pkgPath, parts[0], parts[1])
-}
-
-func (f *File) addImport() {
-	// Add import after package declaration
-	importStmt := f.renderImport()
-	f.edit.Insert(f.offset(f.astFile.Name.End()), importStmt)
-}
-
-func (f *File) renderImport() string {
-	imprt := "\n"
-	imprt += fmt.Sprintf(`import %s "runtime"`, runtimePkg) + "\n"
-	return imprt
 }
 
 func (f *File) offset(pos token.Pos) int {
@@ -546,7 +532,8 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 		return nil
 	case *ast.FuncLit:
 		parent := f.curFunc
-		fn := newFunction(parent.createAnonymFuncName())
+		fname := f.createAnonymFuncName(parent)
+		fn := newFunction(fname)
 		f.curFunc = fn
 		f.funcs = append(f.funcs, fn)
 		ast.Walk(f, n.Body)
@@ -554,6 +541,22 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 		return nil
 	}
 	return f
+}
+
+func (f *File) createAnonymFuncName(fn *Function) string {
+	if fn == nil {
+		defer func() { f.anonymGlobalFuncIdx++ }()
+		return fmt.Sprintf("init$%d", f.anonymGlobalFuncIdx)
+	}
+
+	defer func() { fn.anonymFuncIdx++ }()
+	if fn.name == "init" {
+		// TODO: It is not possible to determine how many other init functions are defined from the information in the current file,
+		// so it is always counted as #1.
+		// This logic will cause issues if there are multiple init functions.
+		return fmt.Sprintf("init#1$%d", fn.anonymFuncIdx)
+	}
+	return fmt.Sprintf("%s$%d", fn.name, fn.anonymFuncIdx)
 }
 
 // findText finds text in the original source, starting at pos.
@@ -669,11 +672,11 @@ func (f *File) newCounter(start, end token.Pos, numStmt int) string {
 	// Generate both standard coverage call and our custom call
 	// This ensures compatibility with Go's coverage runtime while adding our functionality.
 	stmt := fmt.Sprintf(
-		"%s_Trace(%q, %s.PGID(), %s.GID(), %d, %d, %d, %d, %d, %d)",
+		"%s_Trace(%q, %s_PGID(), %s_GID(), %d, %d, %d, %d, %d, %d)",
 		tobariPkg,
 		f.name,
-		runtimePkg,
-		runtimePkg,
+		tobariPkg,
+		tobariPkg,
 		blockIndex,
 		stpos.Line, enpos.Line,
 		stpos.Column, enpos.Column,
