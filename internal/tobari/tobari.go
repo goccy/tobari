@@ -32,13 +32,39 @@ func ClearCounters() {
 	entryMapMu.Unlock()
 }
 
-func CoverProfileMap(mode string) map[string]string {
+func CoverEntriesByName(name string) []*CoverEntry {
 	entryMapMu.RLock()
 	defer entryMapMu.RUnlock()
 
-	ret := make(map[string]string)
 	for _, e := range entryMap {
-		ret[e.Name] = renderMap(mode, e.CoverprofileMap())
+		if e.Name != name {
+			continue
+		}
+		return toEntries(e.CoverprofileMap())
+	}
+	return nil
+}
+
+func CoverProfileMap(mode string) map[string]string {
+	entriesMap := CoverEntriesMap()
+	ret := make(map[string]string, len(entriesMap))
+	for k, entries := range entriesMap {
+		b := bytes.NewBuffer([]byte(fmt.Sprintf("mode: %s\n", mode)))
+		for _, entry := range entries {
+			_, _ = fmt.Fprint(b, entry.String()+"\n")
+		}
+		ret[k] = b.String()
+	}
+	return ret
+}
+
+func CoverEntriesMap() map[string][]*CoverEntry {
+	entryMapMu.RLock()
+	defer entryMapMu.RUnlock()
+
+	ret := make(map[string][]*CoverEntry)
+	for _, e := range entryMap {
+		ret[e.Name] = toEntries(e.CoverprofileMap())
 	}
 	return ret
 }
@@ -47,7 +73,7 @@ func WriteCoverProfile(mode string, w io.Writer) {
 	entryMapMu.RLock()
 	defer entryMapMu.RUnlock()
 
-	mergeMap := make(map[string]string)
+	mergeMap := make(map[string]*CoverEntry)
 	for _, e := range entryMap {
 		for k, v := range e.CoverprofileMap() {
 			mergeMap[k] = v
@@ -78,7 +104,7 @@ func WriteAllCoverProfile(mode string, w io.Writer) {
 		g.blockToCountMap(blockToCountMap)
 	}
 
-	newCoverprofileMap := make(map[string]string)
+	newCoverprofileMap := make(map[string]*CoverEntry)
 	allCoverprofileMapMu.RLock()
 	maps.Copy(newCoverprofileMap, allCoverprofileMap)
 	allCoverprofileMapMu.RUnlock()
@@ -88,14 +114,15 @@ func WriteAllCoverProfile(mode string, w io.Writer) {
 		if block == nil {
 			continue
 		}
-		newCoverprofileMap[bid] = fmt.Sprintf(
-			"%s:%d.%d,%d.%d %d %d",
-			block.FileName,
-			block.Start.Line, block.Start.Col,
-			block.End.Line, block.End.Col,
-			block.NumStmts,
-			count,
-		)
+		newCoverprofileMap[bid] = &CoverEntry{
+			FileName:  block.FileName,
+			StartLine: block.Start.Line,
+			StartCol:  block.Start.Col,
+			EndLine:   block.End.Line,
+			EndCol:    block.End.Col,
+			NumStmts:  block.NumStmts,
+			Count:     count,
+		}
 	}
 
 	_, _ = fmt.Fprint(w, renderMap(mode, newCoverprofileMap))
@@ -123,13 +150,36 @@ type TraceEntry struct {
 	Roots []*TraceG
 }
 
-func (e *TraceEntry) CoverprofileMap() map[string]string {
+type CoverEntry struct {
+	FileName  string
+	StartLine int
+	StartCol  int
+	EndLine   int
+	EndCol    int
+	NumStmts  int
+	Count     int
+}
+
+func (e *CoverEntry) String() string {
+	return fmt.Sprintf(
+		"%s:%d.%d,%d.%d %d %d",
+		e.FileName,
+		e.StartLine,
+		e.StartCol,
+		e.EndLine,
+		e.EndCol,
+		e.NumStmts,
+		e.Count,
+	)
+}
+
+func (e *TraceEntry) CoverprofileMap() map[string]*CoverEntry {
 	blockToCountMap := make(map[string]int)
 	for _, root := range e.Roots {
 		root.blockToCountMap(blockToCountMap)
 	}
 
-	newCoverprofileMap := make(map[string]string)
+	newCoverprofileMap := make(map[string]*CoverEntry)
 	hitCandidateFuncMap := make(map[*Function]struct{})
 	for bid, count := range blockToCountMap {
 		block := getBlock(bid)
@@ -137,14 +187,15 @@ func (e *TraceEntry) CoverprofileMap() map[string]string {
 			continue
 		}
 		resolveCandidateFuncMap(block.Function, hitCandidateFuncMap)
-		newCoverprofileMap[bid] = fmt.Sprintf(
-			"%s:%d.%d,%d.%d %d %d",
-			block.FileName,
-			block.Start.Line, block.Start.Col,
-			block.End.Line, block.End.Col,
-			block.NumStmts,
-			count,
-		)
+		newCoverprofileMap[bid] = &CoverEntry{
+			FileName:  block.FileName,
+			StartLine: block.Start.Line,
+			StartCol:  block.Start.Col,
+			EndLine:   block.End.Line,
+			EndCol:    block.End.Col,
+			NumStmts:  block.NumStmts,
+			Count:     count,
+		}
 	}
 	for fn := range hitCandidateFuncMap {
 		for _, block := range fn.Blocks {
@@ -152,13 +203,14 @@ func (e *TraceEntry) CoverprofileMap() map[string]string {
 			if _, exists := newCoverprofileMap[bid]; exists {
 				continue
 			}
-			newCoverprofileMap[bid] = fmt.Sprintf(
-				"%s:%d.%d,%d.%d %d 0",
-				block.FileName,
-				block.Start.Line, block.Start.Col,
-				block.End.Line, block.End.Col,
-				block.NumStmts,
-			)
+			newCoverprofileMap[bid] = &CoverEntry{
+				FileName:  block.FileName,
+				StartLine: block.Start.Line,
+				StartCol:  block.Start.Col,
+				EndLine:   block.End.Line,
+				EndCol:    block.End.Col,
+				NumStmts:  block.NumStmts,
+			}
 		}
 	}
 	return newCoverprofileMap
@@ -252,7 +304,7 @@ var (
 	funcMap                map[string]*Function
 	funcNames              []string
 	funcMapMu              sync.RWMutex
-	allCoverprofileMap     map[string]string
+	allCoverprofileMap     map[string]*CoverEntry
 	allCoverprofileMapKeys []string
 	allCoverprofileMapMu   sync.RWMutex
 )
@@ -359,7 +411,7 @@ func initMap() {
 		gMap = make(map[uint64]*TraceG)
 		blockMap = make(map[string]*Block)
 		funcMap = make(map[string]*Function)
-		allCoverprofileMap = make(map[string]string)
+		allCoverprofileMap = make(map[string]*CoverEntry)
 	})
 }
 
@@ -388,13 +440,14 @@ func AddCoverMeta(s string) bool {
 			blockMap[bid] = block
 			blockMapMu.Unlock()
 
-			allCoverprofileMap[bid] = fmt.Sprintf(
-				"%s:%d.%d,%d.%d %d 0",
-				md.FileName,
-				block.Start.Line, block.Start.Col,
-				block.End.Line, block.End.Col,
-				block.NumStmts,
-			)
+			allCoverprofileMap[bid] = &CoverEntry{
+				FileName:  md.FileName,
+				StartLine: block.Start.Line,
+				StartCol:  block.Start.Col,
+				EndLine:   block.End.Line,
+				EndCol:    block.End.Col,
+				NumStmts:  block.NumStmts,
+			}
 			allCoverprofileMapKeys = append(allCoverprofileMapKeys, bid)
 		}
 	}
@@ -407,14 +460,26 @@ func AddCoverMeta(s string) bool {
 	return true
 }
 
-func renderMap(mode string, coverMap map[string]string) string {
+func toEntries(coverMap map[string]*CoverEntry) []*CoverEntry {
+	entries := make([]*CoverEntry, 0, len(coverMap))
+	for _, key := range allCoverprofileMapKeys {
+		entry, exists := coverMap[key]
+		if !exists {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+func renderMap(mode string, coverMap map[string]*CoverEntry) string {
 	b := bytes.NewBuffer([]byte(fmt.Sprintf("mode: %s\n", mode)))
 	for _, key := range allCoverprofileMapKeys {
 		value, exists := coverMap[key]
 		if !exists {
 			continue
 		}
-		_, _ = fmt.Fprint(b, value+"\n")
+		_, _ = fmt.Fprint(b, value.String()+"\n")
 	}
 	return b.String()
 }
