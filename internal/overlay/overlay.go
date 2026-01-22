@@ -19,8 +19,8 @@ import (
 	"time"
 )
 
-func Create(ctx context.Context) (string, error) {
-	overlay, err := createOverlay(ctx, []*Definition{
+func Create(ctx context.Context, fix bool) (string, error) {
+	overlay, err := createOverlay(ctx, fix, []*Definition{
 		{
 			PkgPath: "runtime",
 			Functions: []*Function{
@@ -69,12 +69,17 @@ type Overlay struct {
 //go:embed templates/*.tmpl
 var tmpls embed.FS
 
-func createOverlay(ctx context.Context, defs []*Definition) (*Overlay, error) {
+func createOverlay(ctx context.Context, fix bool, defs []*Definition) (*Overlay, error) {
 	root, err := OverlayRootDir(ctx)
 	if err != nil {
 		return nil, err
 	}
-	id := fmt.Sprint(time.Now().UnixNano())
+	var id string
+	if fix {
+		id = "fix"
+	} else {
+		id = fmt.Sprint(time.Now().UnixNano())
+	}
 	if err := os.MkdirAll(filepath.Join(root, id), 0o755); err != nil {
 		return nil, err
 	}
