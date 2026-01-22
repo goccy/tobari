@@ -85,6 +85,8 @@ First, install the `tobari` tool with the following command:
 go install github.com/goccy/tobari/cmd/tobari@latest
 ```
 
+> **Important**: The version of the tobari CLI tool and the tobari library used in your application must match. For example, if you install `tobari@v0.2.1`, your `go.mod` should also require `github.com/goccy/tobari v0.2.1`. Version mismatch will cause fingerprint errors during linking.
+
 ### 2. Use the API (like using the `runtime/coverage` package)
 
 Using a gRPC server as an example:

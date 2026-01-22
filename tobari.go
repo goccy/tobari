@@ -96,8 +96,78 @@ func WriteCoverProfileByName(name string, mode Mode, w io.Writer) {
 	tobari.WriteCoverProfileByName(name, string(mode), w)
 }
 
+// CoverProfile represents coverage data in coverprofile format.
+type CoverProfile struct {
+	// Mode indicates the coverage mode used.
+	Mode Mode
+	// Entries contains the list of coverage entries.
+	Entries []*Entry
+}
+
+// Entry represents a coverage entry for a source file.
+type Entry struct {
+	// FileName is the name of the source file.
+	FileName string
+	// Start is the starting position of the covered entry.
+	Start EntryPos
+	// End is the ending position of the covered entry.
+	End EntryPos
+	// StatementCount is the number of statements in the covered entry.
+	StatementCount int
+	// Count is the number of times the entry was covered.
+	Count int
+}
+
+// EntryPos represents a position in a source file.
+type EntryPos struct {
+	// Line number in the source file.
+	Line int
+	// Column number in the source file.
+	Column int
+}
+
+// CoverProfileByName retrieve coverage data for the specified name.
+func CoverProfileByName(name string, mode Mode) *CoverProfile {
+	return &CoverProfile{
+		Mode:    mode,
+		Entries: toEntries(tobari.CoverEntriesByName(name)),
+	}
+}
+
 // CoverProfileMap if coverage was measured using CoverWithName,
 // it outputs the correspondence between the names and the coverprofile data for each name.
-func CoverProfileMap(mode Mode) map[string]string {
-	return tobari.CoverProfileMap(string(mode))
+func CoverProfileMap(mode Mode) map[string]*CoverProfile {
+	entriesMap := tobari.CoverEntriesMap()
+	coverprofMap := make(map[string]*CoverProfile, len(entriesMap))
+	for name, entries := range entriesMap {
+		coverprofMap[name] = &CoverProfile{
+			Mode:    mode,
+			Entries: toEntries(entries),
+		}
+	}
+	return coverprofMap
+}
+
+func toEntries(e []*tobari.CoverEntry) []*Entry {
+	ret := make([]*Entry, 0, len(e))
+	for _, ee := range e {
+		ret = append(ret, toEntry(ee))
+	}
+	return ret
+}
+
+func toEntry(e *tobari.CoverEntry) *Entry {
+	return &Entry{
+		FileName: e.FileName,
+		Start: EntryPos{
+			Line:   e.StartLine,
+			Column: e.StartCol,
+		},
+		End: EntryPos{
+			Line:   e.EndLine,
+			Column: e.EndCol,
+		},
+		StatementCount: e.NumStmts,
+		Count:          e.Count,
+	}
 }

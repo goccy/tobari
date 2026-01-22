@@ -13,7 +13,7 @@ import (
 	"internal/coverage/slicewriter"
 )
 
-//go:linkname coverProfileMap github.com/goccy/tobari.CoverProfileMap
+//go:linkname coverProfileMap github.com/goccy/tobari/internal/tobari.CoverProfileMap
 func coverProfileMap(string) map[string]string
 
 func coverTearDown(coverprofile string, gocoverdir string) (string, error) {
