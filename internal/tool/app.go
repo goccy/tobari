@@ -1,7 +1,6 @@
 package tool
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,17 +10,12 @@ import (
 
 	"golang.org/x/mod/modfile"
 
-	"github.com/goccy/tobari/internal/overlay"
 	"github.com/goccy/tobari/internal/version"
 )
 
 func buildPackages(ver *version.Version, lang string) (map[string]string, error) {
 	if err := createApp(ver, lang); err != nil {
 		return nil, fmt.Errorf("failed to create temp app: %w", err)
-	}
-	overlayPath, err := overlay.OverlayPath(context.Background())
-	if err != nil {
-		return nil, err
 	}
 	path := appPath(ver)
 	pkgs := make(map[string]string)
@@ -35,6 +29,12 @@ func buildPackages(ver *version.Version, lang string) (map[string]string, error)
 		}
 		newEnvs = append(newEnvs, kv)
 	}
+	// Get the current tobari binary path for -toolexec
+	tobariPath, err := os.Executable()
+	if err != nil {
+		tobariPath = ""
+	}
+
 	for _, def := range []struct {
 		name string
 		pkg  string
@@ -42,9 +42,16 @@ func buildPackages(ver *version.Version, lang string) (map[string]string, error)
 		{name: "tobari.pkg", pkg: "github.com/goccy/tobari"},
 		{name: "internal_tobari.pkg", pkg: "github.com/goccy/tobari/internal/tobari"},
 	} {
-		cmd := exec.Command("go", "build", "-o", def.name, "-buildmode=archive", "-overlay", overlayPath, def.pkg)
+		// Build with -toolexec to ensure consistent fingerprints with modified runtime
+		// Set TOBARI_BUILD_SELF=1 to prevent recursion
+		var cmd *exec.Cmd
+		if tobariPath != "" {
+			cmd = exec.Command("go", "build", "-o", def.name, "-buildmode=archive", "-toolexec="+tobariPath, def.pkg)
+		} else {
+			cmd = exec.Command("go", "build", "-o", def.name, "-buildmode=archive", def.pkg)
+		}
 		cmd.Dir = path
-		cmd.Env = newEnvs
+		cmd.Env = append(newEnvs, "TOBARI_BUILD_SELF=1")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return nil, fmt.Errorf("failed to build app %s: %w", string(out), err)
@@ -78,12 +85,13 @@ func createGoMod(path string, ver *version.Version, lang string) error {
 	if err := f.AddModuleStmt("tobari"); err != nil {
 		return fmt.Errorf("failed to add module stmt: %w", err)
 	}
-	// Always set go version to match the runtime version
+	// Always set go version to match the current running Go version
 	// This ensures consistency when building with toolchain directive
 	goVer := lang
 	if goVer == "" {
-		// Use runtime version when lang is not specified (e.g., from link tool)
-		goVer = runtime.Version()
+		// Use GOVERSION from environment when lang is not specified
+		// This handles the case where toolchain directive switches Go versions
+		goVer = getGoVersion()
 	}
 	goVer = strings.TrimPrefix(goVer, "go")
 	if err := f.AddGoStmt(goVer); err != nil {
@@ -156,9 +164,20 @@ func main() {
 func appPath(ver *version.Version) string {
 	return filepath.Join(
 		tobariRoot(),
-		runtime.Version(),
+		getGoVersion(),
 		runtime.GOARCH,
 		ver.ID(),
 		fmt.Sprint(os.Getpid()),
 	)
+}
+
+// getGoVersion returns the current Go version from `go env GOVERSION`
+// This handles the case where a toolchain directive switches Go versions
+func getGoVersion() string {
+	out, err := exec.Command("go", "env", "GOVERSION").Output()
+	if err != nil {
+		// Fallback to runtime.Version() if go env fails
+		return runtime.Version()
+	}
+	return strings.TrimSpace(string(out))
 }
