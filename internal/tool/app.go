@@ -78,11 +78,16 @@ func createGoMod(path string, ver *version.Version, lang string) error {
 	if err := f.AddModuleStmt("tobari"); err != nil {
 		return fmt.Errorf("failed to add module stmt: %w", err)
 	}
-	if lang != "" {
-		goVer := strings.TrimPrefix(lang, "go")
-		if err := f.AddGoStmt(goVer); err != nil {
-			return fmt.Errorf("failed to add go stmt: %w", err)
-		}
+	// Always set go version to match the runtime version
+	// This ensures consistency when building with toolchain directive
+	goVer := lang
+	if goVer == "" {
+		// Use runtime version when lang is not specified (e.g., from link tool)
+		goVer = runtime.Version()
+	}
+	goVer = strings.TrimPrefix(goVer, "go")
+	if err := f.AddGoStmt(goVer); err != nil {
+		return fmt.Errorf("failed to add go stmt: %w", err)
 	}
 	if ver.LocalPath != "" {
 		rel, err := filepath.Rel(path, ver.LocalPath)
