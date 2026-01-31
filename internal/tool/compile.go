@@ -8,10 +8,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/goccy/tobari/internal/overlay"
 )
 
 func handleCompile(ctx context.Context, toolPath string, args []string) error {
-	args, err := filterCoveragecfg(args)
+	// Replace file paths and add new files based on overlay Replace map.
+	// This handles the case where Go's overlay mechanism doesn't work
+	// (e.g., when toolchain is installed in GOMODCACHE).
+	replace, err := overlay.GetReplace(ctx)
+	if err == nil {
+		args = applyOverlayReplacements(args, replace)
+	}
+
+	args, err = filterCoveragecfg(args)
 	if err != nil {
 		return err
 	}
@@ -85,6 +95,76 @@ SEARCH_TOBARI_PKG_END:
 		return fmt.Errorf("failed to update importcfg: %w", err)
 	}
 	return nil
+}
+
+// applyOverlayReplacements replaces file paths and adds new files based on overlay Replace map.
+// This is essential for toolchain directive support where Go is installed in GOMODCACHE
+// and the standard overlay mechanism may not work correctly.
+func applyOverlayReplacements(args []string, replace map[string]string) []string {
+	// Build a set of existing file paths in args for quick lookup
+	existingFiles := make(map[string]bool)
+	for _, arg := range args {
+		if filepath.Ext(arg) == ".go" {
+			existingFiles[arg] = true
+			// Also add the absolute path
+			if abs, err := filepath.Abs(arg); err == nil {
+				existingFiles[abs] = true
+			}
+		}
+	}
+
+	// Get the package name from -p flag
+	pkgName := getPkgNameFromArgs(args)
+
+	// Collect new files to add
+	var newFiles []string
+	for origPath, newPath := range replace {
+		// Check if this is a new file (tobari.go) for the current package
+		if strings.HasSuffix(origPath, "/tobari.go") {
+			// Extract package name from origPath
+			// e.g., /usr/local/go/src/runtime/tobari.go -> runtime
+			dir := filepath.Dir(origPath)
+			pkgFromPath := filepath.Base(dir)
+
+			// Check if this tobari.go belongs to the current package
+			if pkgFromPath == pkgName {
+				// Only add if not already in args (overlay might have already added it)
+				if !existingFiles[newPath] {
+					newFiles = append(newFiles, newPath)
+				}
+			}
+		}
+	}
+
+	// Replace existing file paths in args
+	for i, arg := range args {
+		if filepath.Ext(arg) != ".go" {
+			continue
+		}
+		// Try to match the arg with an original path in replace map
+		absArg, err := filepath.Abs(arg)
+		if err != nil {
+			continue
+		}
+		if newPath, ok := replace[absArg]; ok {
+			// Replace with the overlay path if not already replaced
+			if args[i] != newPath {
+				args[i] = newPath
+			}
+		}
+	}
+
+	// Add new files to the compile arguments
+	return append(args, newFiles...)
+}
+
+func getPkgNameFromArgs(args []string) string {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-p" && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 func filterCoveragecfg(args []string) ([]string, error) {
