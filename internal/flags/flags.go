@@ -10,7 +10,7 @@ import (
 	"github.com/goccy/tobari/internal/overlay"
 )
 
-func Run(ctx context.Context, tobariBinPath string, fix bool) (string, error) {
+func Run(ctx context.Context, tobariBinPath string) (string, error) {
 	path, err := exec.LookPath(tobariBinPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to find tobari binary path from %s: %w", tobariBinPath, err)
@@ -22,13 +22,13 @@ func Run(ctx context.Context, tobariBinPath string, fix bool) (string, error) {
 		}
 		path = p
 	}
-	f, err := overlay.Create(ctx, fix)
+	overlayPath, err := overlay.Create(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to create overlay file: %w", err)
 	}
 	return strings.Join([]string{
 		"-cover",
-		"-overlay=" + f,
+		"-overlay=" + overlayPath,
 		"-toolexec=" + path,
 	}, " "), nil
 }

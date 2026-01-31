@@ -2,15 +2,27 @@ package tool
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
+
+	"github.com/goccy/tobari/internal/overlay"
 )
 
 func Handle(ctx context.Context, args []string) error {
 	toolPath := args[1]
 	toolArgs := args[2:]
+
+	// Handle -V=full flag to isolate build cache
+	if slices.Contains(toolArgs, "-V=full") {
+		return handleVersionFull(ctx, toolPath, toolArgs)
+	}
 
 	toolName := filepath.Base(toolPath)
 	switch toolName {
@@ -49,4 +61,34 @@ func runCommand(bin string, args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
+}
+
+func handleVersionFull(ctx context.Context, toolPath string, args []string) error {
+	// Execute the original tool to get version info
+	out, err := exec.CommandContext(ctx, toolPath, args...).Output()
+	if err != nil {
+		// If the tool fails, just run it normally
+		runCommand(toolPath, args)
+		return nil
+	}
+
+	// Get the Replace map from overlay.json
+	replace, err := overlay.GetReplace(ctx)
+	if err != nil {
+		// If overlay.json doesn't exist, just output the original version
+		fmt.Print(string(out))
+		return nil
+	}
+
+	// Compute hash from the Replace map
+	h := sha256.New()
+	if err := json.NewEncoder(h).Encode(replace); err != nil {
+		fmt.Print(string(out))
+		return nil
+	}
+	hash := hex.EncodeToString(h.Sum(nil))[:16]
+
+	// Output version with tobari hash suffix
+	fmt.Printf("%s tobari:%s\n", strings.TrimSpace(string(out)), hash)
+	return nil
 }

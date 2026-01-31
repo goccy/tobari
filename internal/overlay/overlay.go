@@ -3,7 +3,9 @@ package overlay
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"go/ast"
@@ -14,13 +16,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/template"
-	"time"
 )
 
-func Create(ctx context.Context, fix bool) (string, error) {
-	overlay, err := createOverlay(ctx, fix, []*Definition{
+func Create(ctx context.Context) (string, error) {
+	overlay, err := createOverlay(ctx, []*Definition{
 		{
 			PkgPath: "runtime",
 			Functions: []*Function{
@@ -69,35 +71,36 @@ type Overlay struct {
 //go:embed templates/*.tmpl
 var tmpls embed.FS
 
-func createOverlay(ctx context.Context, fix bool, defs []*Definition) (*Overlay, error) {
+func createOverlay(ctx context.Context, defs []*Definition) (*Overlay, error) {
 	root, err := OverlayRootDir(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var id string
-	if fix {
-		id = "fix"
-	} else {
-		id = fmt.Sprint(time.Now().UnixNano())
-	}
-	if err := os.MkdirAll(filepath.Join(root, id), 0o755); err != nil {
-		return nil, err
-	}
 
-	overlayMap := make(map[string]string)
+	// Use fixed suffix "tobari" for function names to make hash deterministic
+	const funcSuffix = "tobari"
+
+	// First pass: collect all rendered content to compute hash
+	type renderedFile struct {
+		pkgPath  string
+		fileName string
+		content  []byte
+		isNew    bool // true for template-generated files, false for modified files
+		origPath string
+	}
+	var renderedFiles []renderedFile
+
 	for _, def := range defs {
-		if err := os.MkdirAll(filepath.Join(root, id, def.PkgPath), 0o755); err != nil {
-			return nil, err
-		}
-		pkgPath, err := pkgPath(ctx, def.PkgPath)
+		pkgPathStr, err := pkgPath(ctx, def.PkgPath)
 		if err != nil {
 			return nil, err
 		}
-		pkgFiles, err := pkgGoFiles(ctx, pkgPath)
+		pkgFiles, err := pkgGoFiles(ctx, pkgPathStr)
 		if err != nil {
 			return nil, err
 		}
 		pkgScopedReplacedNameMap := make(map[string]string)
+
 		for _, pkgFile := range pkgFiles {
 			src, err := os.ReadFile(pkgFile)
 			if err != nil {
@@ -120,7 +123,7 @@ func createOverlay(ctx context.Context, fix bool, defs []*Definition) (*Overlay,
 				if fn == nil {
 					continue
 				}
-				newName := fn.Name + "_" + id
+				newName := fn.Name + "_" + funcSuffix
 				funcDecl.Name = &ast.Ident{Name: newName}
 				fileScopedReplacedNameMap[fn.Name] = newName
 				pkgScopedReplacedNameMap[fn.Name] = newName
@@ -130,23 +133,59 @@ func createOverlay(ctx context.Context, fix bool, defs []*Definition) (*Overlay,
 				if err := format.Node(&buf, fset, file); err != nil {
 					return nil, fmt.Errorf("failed to format AST: %w", err)
 				}
-				tmpFile := filepath.Join(root, id, def.PkgPath, filepath.Base(pkgFile))
-				if err := os.WriteFile(tmpFile, buf.Bytes(), 0o600); err != nil {
-					return nil, err
-				}
-				overlayMap[pkgFile] = tmpFile
+				renderedFiles = append(renderedFiles, renderedFile{
+					pkgPath:  def.PkgPath,
+					fileName: filepath.Base(pkgFile),
+					content:  buf.Bytes(),
+					isNew:    false,
+					origPath: pkgFile,
+				})
 			}
 		}
+
 		b, err := evalTemplate(def.Template, pkgScopedReplacedNameMap)
 		if err != nil {
 			return nil, err
 		}
-		tmpFile := filepath.Join(root, id, def.PkgPath, id+".go")
-		if err := os.WriteFile(tmpFile, b, 0o600); err != nil {
+		renderedFiles = append(renderedFiles, renderedFile{
+			pkgPath:  def.PkgPath,
+			fileName: "tobari.go",
+			content:  b,
+			isNew:    true,
+			origPath: filepath.Join(pkgPathStr, "tobari.go"),
+		})
+	}
+
+	// Compute hash from all rendered content
+	h := sha256.New()
+	// Sort by origPath to ensure deterministic ordering
+	sort.Slice(renderedFiles, func(i, j int) bool {
+		return renderedFiles[i].origPath < renderedFiles[j].origPath
+	})
+	for _, rf := range renderedFiles {
+		h.Write([]byte(rf.origPath))
+		h.Write(rf.content)
+	}
+	id := hex.EncodeToString(h.Sum(nil))[:16]
+
+	// Create directories and write files
+	if err := os.MkdirAll(filepath.Join(root, id), 0o755); err != nil {
+		return nil, err
+	}
+
+	overlayMap := make(map[string]string)
+	for _, rf := range renderedFiles {
+		dirPath := filepath.Join(root, id, rf.pkgPath)
+		if err := os.MkdirAll(dirPath, 0o755); err != nil {
 			return nil, err
 		}
-		overlayMap[filepath.Join(pkgPath, id+".go")] = tmpFile
+		tmpFile := filepath.Join(dirPath, rf.fileName)
+		if err := os.WriteFile(tmpFile, rf.content, 0o600); err != nil {
+			return nil, err
+		}
+		overlayMap[rf.origPath] = tmpFile
 	}
+
 	path, _ := OverlayPath(ctx)
 	return &Overlay{Replace: overlayMap, path: path}, nil
 }
@@ -269,4 +308,24 @@ func goVersion(ctx context.Context) (string, error) {
 		return string(out), fmt.Errorf("failed to get GOROOT: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// GetReplace reads overlay.json and returns the Replace map.
+func GetReplace(ctx context.Context) (map[string]string, error) {
+	path, err := OverlayPath(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var overlay Overlay
+	if err := json.Unmarshal(data, &overlay); err != nil {
+		return nil, err
+	}
+
+	return overlay.Replace, nil
 }

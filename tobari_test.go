@@ -141,3 +141,78 @@ func TestZeroConfiguration(t *testing.T) {
 		t.Log(string(out))
 	}
 }
+
+func TestToolchain(t *testing.T) {
+	ctx := t.Context()
+	tobariBin := filepath.Join(t.TempDir(), "tobari-test")
+	defer func() {
+		_ = os.RemoveAll(tobariBin)
+	}()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := exec.CommandContext(
+		ctx,
+		"go",
+		"build",
+		"-o",
+		tobariBin,
+		"./cmd/tobari",
+	).CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+
+	dir := filepath.Join("testdata", "toolchain")
+
+	// Run tobari flags in the toolchain directory
+	flagsCmd := exec.CommandContext(ctx, tobariBin, "flags")
+	flagsCmd.Dir = dir
+	tobariFlagsOut, err := flagsCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to run tobari flags: %s: %v", string(tobariFlagsOut), err)
+	}
+	tobariFlags := strings.TrimSpace(string(tobariFlagsOut))
+
+	// Run the test with toolchain specified go.mod
+	args := append(
+		[]string{"run"},
+		strings.Split(tobariFlags, " ")...,
+	)
+	args = append(args, "main.go")
+	cmd := exec.CommandContext(ctx, "go", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to run test: %s: %v", string(out), err)
+	} else {
+		t.Log(string(out))
+	}
+
+	// Check the generated cover file
+	coverFile := filepath.Join(dir, "toolchain.cover")
+	f, err := os.ReadFile(coverFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, line := range strings.Split(string(f), "\n") {
+		if strings.HasPrefix(line, "/") {
+			out = append(out, strings.TrimPrefix(line, cwd+"/"))
+		} else {
+			out = append(out, line)
+		}
+	}
+	got := strings.Join(out, "\n")
+	expected, err := os.ReadFile(filepath.Join(dir, "expected.cover"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(got, string(expected)); diff != "" {
+		t.Errorf("(-got, +want)\n%s", diff)
+	}
+
+	// Cleanup generated cover file
+	_ = os.Remove(coverFile)
+}
