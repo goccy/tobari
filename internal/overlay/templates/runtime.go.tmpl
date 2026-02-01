@@ -13,5 +13,8 @@ func PGID() uint64 { return getg().parentGoid }
 
 //go:linkname coverage_getCovCounterList internal/coverage/cfile.getCovCounterList
 func coverage_getCovCounterList() []rtcov.CovCounterBlob {
-	return {{ .coverage_getCovCounterList }}()
+	return getCovCounterListTobari()
 }
+
+//go:linkname getCovCounterListTobari
+func getCovCounterListTobari() []rtcov.CovCounterBlob
