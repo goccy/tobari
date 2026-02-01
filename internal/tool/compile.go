@@ -23,9 +23,7 @@ func handleCompile(ctx context.Context, toolPath string, args []string) error {
 	}
 
 	// If new tobari.go files were added, ensure their imports are in the importcfg
-	// Skip when building tobari packages to prevent recursion
-	pkgName := getPkgNameFromArgs(args)
-	if len(addedFiles) > 0 && !strings.HasPrefix(pkgName, "github.com/goccy/tobari") {
+	if len(addedFiles) > 0 {
 		if err := addMissingImportsToImportcfg(ctx, args, addedFiles); err != nil {
 			return err
 		}
@@ -51,12 +49,6 @@ func handleCompile(ctx context.Context, toolPath string, args []string) error {
 // In such cases, if the target test uses github.com/goccy/tobari, linking is possible;
 // however, if it doesn't use it, a tobari package must be created dynamically and its path specified.
 func addTobariPkgsToImportcfgFromCompileOptions(args []string) error {
-	// Skip when building tobari packages to prevent recursion
-	pkgName := getPkgNameFromArgs(args)
-	if strings.HasPrefix(pkgName, "github.com/goccy/tobari") {
-		return nil
-	}
-
 	importCfgPath := getImportcfgPathFromArgs(args)
 
 	var goFiles []string

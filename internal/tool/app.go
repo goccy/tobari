@@ -43,7 +43,7 @@ func buildPackages(ver *version.Version, lang string) (map[string]string, error)
 		{name: "internal_tobari.pkg", pkg: "github.com/goccy/tobari/internal/tobari"},
 	} {
 		// Build with -toolexec to ensure consistent fingerprints with modified runtime
-		// Recursion is prevented by checking package name in compile.go
+		// Recursion is prevented because tobari packages are already in importcfg when building them
 		var cmd *exec.Cmd
 		if tobariPath != "" {
 			cmd = exec.Command("go", "build", "-o", def.name, "-buildmode=archive", "-toolexec="+tobariPath, def.pkg)
