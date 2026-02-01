@@ -64,12 +64,9 @@ func Create(ctx context.Context) (string, error) {
 }
 
 type Overlay struct {
-	// Replace contains paths that can be used with -overlay flag
-	// (paths outside GOMODCACHE)
+	// Replace contains original path -> overlay path mappings
+	// Used by toolexec to replace files during compilation
 	Replace map[string]string
-	// ToolexecReplace contains paths that must be replaced via toolexec
-	// (paths inside GOMODCACHE, where -overlay is not allowed)
-	ToolexecReplace map[string]string `json:",omitempty"`
 	// ExportPaths contains package import paths -> compiled archive paths
 	// for imports needed by tobari.go files
 	ExportPaths map[string]string `json:",omitempty"`
@@ -181,11 +178,7 @@ func createOverlay(ctx context.Context, defs []*Definition) (*Overlay, error) {
 		return nil, err
 	}
 
-	// Get GOMODCACHE to determine which paths can use -overlay
-	goModCache, _ := goModCachePath(ctx)
-
 	overlayMap := make(map[string]string)
-	toolexecReplaceMap := make(map[string]string)
 
 	// Collect all imports from tobari.go files
 	allImports := make(map[string]bool)
@@ -198,13 +191,7 @@ func createOverlay(ctx context.Context, defs []*Definition) (*Overlay, error) {
 		if err := os.WriteFile(tmpFile, rf.content, 0o600); err != nil {
 			return nil, err
 		}
-		// Paths inside GOMODCACHE cannot be replaced via -overlay
-		// They must be replaced via toolexec instead
-		if goModCache != "" && strings.HasPrefix(rf.origPath, goModCache) {
-			toolexecReplaceMap[rf.origPath] = tmpFile
-		} else {
-			overlayMap[rf.origPath] = tmpFile
-		}
+		overlayMap[rf.origPath] = tmpFile
 
 		// For tobari.go files, collect their imports
 		if rf.isNew {
@@ -229,7 +216,7 @@ func createOverlay(ctx context.Context, defs []*Definition) (*Overlay, error) {
 	exportPaths, _ := collectExportPaths(ctx, importList)
 
 	path, _ := OverlayPath(ctx)
-	return &Overlay{Replace: overlayMap, ToolexecReplace: toolexecReplaceMap, ExportPaths: exportPaths, path: path}, nil
+	return &Overlay{Replace: overlayMap, ExportPaths: exportPaths, path: path}, nil
 }
 
 type Definition struct {
@@ -352,18 +339,6 @@ func goVersion(ctx context.Context) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func goModCachePath(ctx context.Context) (string, error) {
-	cmd, err := exec.LookPath("go")
-	if err != nil {
-		return "", fmt.Errorf("failed to find go binary path: %w", err)
-	}
-	out, err := exec.CommandContext(ctx, cmd, "env", "GOMODCACHE").CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("failed to get GOMODCACHE: %w", err)
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
 // collectExportPaths runs `go list -export -json` for the given packages
 // and returns a map of import path -> export file path
 func collectExportPaths(ctx context.Context, packages []string) (map[string]string, error) {
@@ -416,8 +391,7 @@ func parseImportsFromFile(content []byte) ([]string, error) {
 	return imports, nil
 }
 
-// GetReplace reads overlay.json and returns all replacement paths
-// (both Replace and ToolexecReplace merged together).
+// GetReplace reads overlay.json and returns the replacement paths.
 func GetReplace(ctx context.Context) (map[string]string, error) {
 	path, err := OverlayPath(ctx)
 	if err != nil {
@@ -434,16 +408,7 @@ func GetReplace(ctx context.Context) (map[string]string, error) {
 		return nil, err
 	}
 
-	// Merge Replace and ToolexecReplace
-	result := make(map[string]string, len(overlay.Replace)+len(overlay.ToolexecReplace))
-	for k, v := range overlay.Replace {
-		result[k] = v
-	}
-	for k, v := range overlay.ToolexecReplace {
-		result[k] = v
-	}
-
-	return result, nil
+	return overlay.Replace, nil
 }
 
 // GetExportPaths reads overlay.json and returns the export paths for imports

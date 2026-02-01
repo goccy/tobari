@@ -22,9 +22,7 @@ func Run(ctx context.Context, tobariBinPath string) (string, error) {
 		}
 		path = p
 	}
-	// Create overlay files (used by toolexec, not by -overlay flag)
-	// The -overlay flag cannot be used when GOROOT is inside GOMODCACHE,
-	// so we use toolexec to replace files during compilation instead.
+	// Create overlay files (used by toolexec for file replacement during compilation)
 	if _, err := overlay.Create(ctx); err != nil {
 		return "", fmt.Errorf("failed to create overlay file: %w", err)
 	}
