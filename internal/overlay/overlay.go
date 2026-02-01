@@ -328,13 +328,25 @@ func goRoot(ctx context.Context) (string, error) {
 }
 
 func goVersion(ctx context.Context) (string, error) {
+	// Get GOROOT and extract version from path
+	// This is more reliable than GOVERSION which depends on go.mod/GOTOOLCHAIN
+	root, err := goRoot(ctx)
+	if err != nil {
+		return "", err
+	}
+	// GOROOT is typically like /usr/local/go1.25.1 or /home/user/sdk/go1.25.1
+	base := filepath.Base(root)
+	if strings.HasPrefix(base, "go") {
+		return base, nil
+	}
+	// Fallback: run go env GOVERSION
 	cmd, err := exec.LookPath("go")
 	if err != nil {
 		return "", fmt.Errorf("failed to find go binary path: %w", err)
 	}
 	out, err := exec.CommandContext(ctx, cmd, "env", "GOVERSION").CombinedOutput()
 	if err != nil {
-		return string(out), fmt.Errorf("failed to get GOROOT: %w", err)
+		return string(out), fmt.Errorf("failed to get GOVERSION: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
