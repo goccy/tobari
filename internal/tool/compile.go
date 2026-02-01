@@ -121,13 +121,12 @@ func applyOverlayReplacements(args []string, replace map[string]string) []string
 	for origPath, newPath := range replace {
 		// Check if this is a new file (tobari.go) for the current package
 		if strings.HasSuffix(origPath, "/tobari.go") {
-			// Extract package name from origPath
-			// e.g., /usr/local/go/src/runtime/tobari.go -> runtime
-			dir := filepath.Dir(origPath)
-			pkgFromPath := filepath.Base(dir)
-
 			// Check if this tobari.go belongs to the current package
-			if pkgFromPath == pkgName {
+			// Use suffix matching to handle nested packages correctly
+			// e.g., /usr/local/go/src/runtime/tobari.go matches package "runtime"
+			//       /usr/local/go/src/testing/internal/testdeps/tobari.go matches package "testing/internal/testdeps"
+			expectedSuffix := "/" + pkgName + "/tobari.go"
+			if strings.HasSuffix(origPath, expectedSuffix) {
 				// Only add if not already in args (overlay might have already added it)
 				if !existingFiles[newPath] {
 					newFiles = append(newFiles, newPath)
