@@ -47,9 +47,13 @@ jobs:
       uses: actions/setup-go@v4
       with:
         go-version: "1.24"
+    - name: pre-download toolchain
+      run: |
+        # Pre-download go1.25.1 toolchain to avoid download during test
+        cd testdata/toolchain
+        GOTOOLCHAIN=auto go version
     - name: verify toolchain switch works
       run: |
         # Test that toolchain directive works correctly
-        # This uses Go 1.24 and lets it download go1.25.1 via toolchain directive
         go version
         GOTOOLCHAIN=auto go test -v -run TestToolchain ./...
