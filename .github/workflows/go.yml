@@ -49,8 +49,7 @@ jobs:
         go-version: "1.24"
     - name: verify toolchain switch works
       run: |
-        # Explicitly test that toolchain directive works
-        # This tests the case where go.mod has `toolchain go1.25.x`
-        # and Go needs to download and switch to that version
+        # Test that toolchain directive works correctly
+        # This uses Go 1.24 and lets it download go1.25.1 via toolchain directive
         go version
         GOTOOLCHAIN=auto go test -v -run TestToolchain ./...
