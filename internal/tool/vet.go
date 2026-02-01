@@ -52,7 +52,9 @@ func replaceVetCfgIfNeeded(args []string) error {
 		if _, exists := typedPkgFileMap["runtime"]; !exists {
 			pkgPath, err := readRuntimePkg()
 			if err != nil {
-				return err
+				// If runtime_pkg.txt doesn't exist (e.g., runtime is cached),
+				// skip adding runtime to vet.cfg - vet will find it from cache
+				return nil
 			}
 			typedPkgFileMap["runtime"] = pkgPath
 		}
