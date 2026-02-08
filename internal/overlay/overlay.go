@@ -343,14 +343,14 @@ func goVersion(ctx context.Context) (string, error) {
 	if strings.HasPrefix(base, "go") {
 		return base, nil
 	}
-	// Fallback: run go env GOVERSION
-	cmd, err := exec.LookPath("go")
+	// When GOROOT is a toolchain path (e.g., .../toolchain@v0.0.1-go1.25.6.darwin-amd64),
+	// use the go binary from that GOROOT to get an accurate version.
+	// Using exec.LookPath("go") would find the system go which may return
+	// a different version when run outside a directory with a toolchain directive.
+	goBin := filepath.Join(root, "bin", "go")
+	out, err := exec.CommandContext(ctx, goBin, "env", "GOVERSION").CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("failed to find go binary path: %w", err)
-	}
-	out, err := exec.CommandContext(ctx, cmd, "env", "GOVERSION").CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("failed to get GOVERSION: %w", err)
+		return "", fmt.Errorf("failed to get GOVERSION from %s: %w", goBin, err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
