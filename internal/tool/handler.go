@@ -4,12 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/goccy/tobari/internal/overlay"
@@ -80,11 +80,17 @@ func handleVersionFull(ctx context.Context, toolPath string, args []string) erro
 		return nil
 	}
 
-	// Compute hash from the Replace map
+	// Compute hash from the Replace map (sorted keys for deterministic output)
+	keys := make([]string, 0, len(replace))
+	for k := range replace {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	h := sha256.New()
-	if err := json.NewEncoder(h).Encode(replace); err != nil {
-		fmt.Print(string(out))
-		return nil
+	for _, k := range keys {
+		h.Write([]byte(k))
+		h.Write([]byte(replace[k]))
 	}
 	hash := hex.EncodeToString(h.Sum(nil))[:16]
 
