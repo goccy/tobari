@@ -222,7 +222,7 @@ func TestCacheBehavior(t *testing.T) {
 				t.Run(a.name, func(t *testing.T) {
 					t.Cleanup(func() {
 						for _, f := range a.cleanup {
-							os.Remove(f)
+							_ = os.Remove(f)
 						}
 					})
 
