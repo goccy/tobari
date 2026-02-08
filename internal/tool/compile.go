@@ -17,9 +17,12 @@ func handleCompile(ctx context.Context, toolPath string, args []string) error {
 	// This handles the case where Go's overlay mechanism doesn't work
 	// (e.g., when toolchain is installed in GOMODCACHE).
 	replace, err := overlay.GetReplace(ctx)
-	var addedFiles []string
-	if err == nil {
-		args, addedFiles = applyOverlayReplacements(args, replace)
+	if err != nil {
+		return fmt.Errorf("failed to get overlay replace map: %w", err)
+	}
+	args, addedFiles, err := applyOverlayReplacements(args, replace)
+	if err != nil {
+		return fmt.Errorf("failed to apply overlay replacements: %w", err)
 	}
 
 	// If new tobari.go files were added, ensure their imports are in the importcfg
@@ -80,7 +83,7 @@ func addTobariPkgsToImportcfgFromCompileOptions(toolPath string, args []string) 
 		}
 		file, err := parser.ParseFile(fset, "", string(f), parser.ImportsOnly)
 		if err != nil {
-			continue
+			return fmt.Errorf("failed to parse file %s: %w", goFile, err)
 		}
 		for _, imprt := range file.Imports {
 			if strings.Contains(imprt.Path.Value, "github.com/goccy/tobari") {
@@ -110,16 +113,18 @@ SEARCH_TOBARI_PKG_END:
 // This is essential for toolchain directive support where Go is installed in GOMODCACHE
 // and the standard overlay mechanism may not work correctly.
 // Returns the modified args and a list of new files that were added.
-func applyOverlayReplacements(args []string, replace map[string]string) ([]string, []string) {
+func applyOverlayReplacements(args []string, replace map[string]string) ([]string, []string, error) {
 	// Build a set of existing file paths in args for quick lookup
 	existingFiles := make(map[string]bool)
 	for _, arg := range args {
 		if filepath.Ext(arg) == ".go" {
 			existingFiles[arg] = true
 			// Also add the absolute path
-			if abs, err := filepath.Abs(arg); err == nil {
-				existingFiles[abs] = true
+			abs, err := filepath.Abs(arg)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to get absolute path for %s: %w", arg, err)
 			}
+			existingFiles[abs] = true
 		}
 	}
 
@@ -155,7 +160,7 @@ func applyOverlayReplacements(args []string, replace map[string]string) ([]strin
 		// Try to match the arg with an original path in replace map
 		absArg, err := filepath.Abs(arg)
 		if err != nil {
-			continue
+			return nil, nil, fmt.Errorf("failed to get absolute path for %s: %w", arg, err)
 		}
 		if newPath, ok := replace[absArg]; ok {
 			// Replace with the overlay path if not already replaced
@@ -166,7 +171,7 @@ func applyOverlayReplacements(args []string, replace map[string]string) ([]strin
 	}
 
 	// Add new files to the compile arguments
-	return append(args, newFiles...), newFiles
+	return append(args, newFiles...), newFiles, nil
 }
 
 func getPkgNameFromArgs(args []string) string {
@@ -189,7 +194,7 @@ func addMissingImportsToImportcfg(ctx context.Context, args []string, addedFiles
 	// Read current importcfg
 	data, err := os.ReadFile(importCfgPath)
 	if err != nil {
-		return nil // importcfg might not exist for some packages
+		return fmt.Errorf("failed to read importcfg %s: %w", importCfgPath, err)
 	}
 	importCfgContent := string(data)
 
@@ -198,12 +203,12 @@ func addMissingImportsToImportcfg(ctx context.Context, args []string, addedFiles
 	for _, filePath := range addedFiles {
 		content, err := os.ReadFile(filePath)
 		if err != nil {
-			continue
+			return fmt.Errorf("failed to read added file %s: %w", filePath, err)
 		}
 		fset := token.NewFileSet()
 		file, err := parser.ParseFile(fset, "", content, parser.ImportsOnly)
 		if err != nil {
-			continue
+			return fmt.Errorf("failed to parse added file %s: %w", filePath, err)
 		}
 		for _, imp := range file.Imports {
 			importPath := strings.Trim(imp.Path.Value, "\"")
@@ -225,7 +230,10 @@ func addMissingImportsToImportcfg(ctx context.Context, args []string, addedFiles
 
 	// Get export paths from overlay
 	exportPaths, err := overlay.GetExportPaths(ctx)
-	if err != nil || exportPaths == nil {
+	if err != nil {
+		return fmt.Errorf("failed to get export paths from overlay: %w", err)
+	}
+	if exportPaths == nil {
 		return nil
 	}
 

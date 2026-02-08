@@ -109,13 +109,13 @@ func createOverlay(ctx context.Context, defs []*Definition) (*Overlay, error) {
 		for _, pkgFile := range pkgFiles {
 			src, err := os.ReadFile(pkgFile)
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("failed to read package file %s: %w", pkgFile, err)
 			}
 
 			fset := token.NewFileSet()
 			file, err := parser.ParseFile(fset, pkgFile, src, 0)
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("failed to parse package file %s: %w", pkgFile, err)
 			}
 
 			fileScopedReplacedNameMap := make(map[string]string)
@@ -196,10 +196,11 @@ func createOverlay(ctx context.Context, defs []*Definition) (*Overlay, error) {
 		// For tobari.go files, collect their imports
 		if rf.isNew {
 			imports, err := parseImportsFromFile(rf.content)
-			if err == nil {
-				for _, imp := range imports {
-					allImports[imp] = true
-				}
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse imports from %s: %w", rf.origPath, err)
+			}
+			for _, imp := range imports {
+				allImports[imp] = true
 			}
 		}
 	}
@@ -213,9 +214,15 @@ func createOverlay(ctx context.Context, defs []*Definition) (*Overlay, error) {
 		}
 		importList = append(importList, imp)
 	}
-	exportPaths, _ := collectExportPaths(ctx, importList)
+	exportPaths, err := collectExportPaths(ctx, importList)
+	if err != nil {
+		return nil, fmt.Errorf("failed to collect export paths: %w", err)
+	}
 
-	path, _ := OverlayPath(ctx)
+	path, err := OverlayPath(ctx)
+	if err != nil {
+		return nil, err
+	}
 	return &Overlay{Replace: overlayMap, ExportPaths: exportPaths, path: path}, nil
 }
 
