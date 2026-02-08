@@ -142,77 +142,113 @@ func TestZeroConfiguration(t *testing.T) {
 	}
 }
 
-func TestToolchain(t *testing.T) {
+func TestCacheBehavior(t *testing.T) {
 	ctx := t.Context()
 	tobariBin := filepath.Join(t.TempDir(), "tobari-test")
-	defer func() {
-		_ = os.RemoveAll(tobariBin)
-	}()
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if out, err := exec.CommandContext(
-		ctx,
-		"go",
-		"build",
-		"-o",
-		tobariBin,
-		"./cmd/tobari",
-	).CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
 		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
 	}
 
-	dir := filepath.Join("testdata", "toolchain")
-
-	// Run tobari flags in the toolchain directory
-	flagsCmd := exec.CommandContext(ctx, tobariBin, "flags")
-	flagsCmd.Dir = dir
-	tobariFlagsOut, err := flagsCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("failed to run tobari flags: %s: %v", string(tobariFlagsOut), err)
-	}
-	tobariFlags := strings.TrimSpace(string(tobariFlagsOut))
-
-	// Run the test with toolchain specified go.mod
-	args := append(
-		[]string{"run"},
-		strings.Split(tobariFlags, " ")...,
-	)
-	args = append(args, "main.go")
-	cmd := exec.CommandContext(ctx, "go", args...)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to run test: %s: %v", string(out), err)
-	} else {
-		t.Log(string(out))
+	type app struct {
+		name     string
+		flagsDir string   // directory for tobari flags (empty = project root)
+		runDir   string   // directory for go run/test (empty = project root)
+		runArgs  []string // extra args for go run after flags
+		hasTest  bool     // supports go test
+		cleanup  []string // files to remove after go run
 	}
 
-	// Check the generated cover file
-	coverFile := filepath.Join(dir, "toolchain.cover")
-	f, err := os.ReadFile(coverFile)
-	if err != nil {
-		t.Fatal(err)
+	apps := []app{
+		{
+			name:    "http",
+			runArgs: []string{"testdata/http/main.go"},
+			cleanup: []string{"http.cover"},
+		},
+		{
+			name:    "covername",
+			runArgs: []string{"testdata/covername/main.go"},
+			cleanup: []string{"covername-foo1.cover", "covername-foo2.cover"},
+		},
+		{
+			name:     "notobari",
+			flagsDir: "testdata/notobari",
+			runDir:   "testdata/notobari",
+			hasTest:  true,
+		},
+		{
+			name:     "toolchain",
+			flagsDir: "testdata/toolchain",
+			runDir:   "testdata/toolchain",
+			hasTest:  true,
+		},
 	}
-	var out []string
-	for _, line := range strings.Split(string(f), "\n") {
-		if strings.HasPrefix(line, "/") {
-			out = append(out, strings.TrimPrefix(line, cwd+"/"))
-		} else {
-			out = append(out, line)
+
+	goRun := func(t *testing.T, a app, tobariFlags []string) {
+		t.Helper()
+		args := append([]string{"run"}, tobariFlags...)
+		args = append(args, a.runArgs...)
+		cmd := exec.CommandContext(ctx, "go", args...)
+		if a.runDir != "" {
+			cmd.Dir = a.runDir
+		}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("go run failed: %s: %v", string(out), err)
 		}
 	}
-	got := strings.Join(out, "\n")
-	expected, err := os.ReadFile(filepath.Join(dir, "expected.cover"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if diff := cmp.Diff(got, string(expected)); diff != "" {
-		t.Errorf("(-got, +want)\n%s", diff)
+
+	goTest := func(t *testing.T, a app, tobariFlags []string) {
+		t.Helper()
+		args := append([]string{"test"}, tobariFlags...)
+		args = append(args, ".", "-count=1")
+		cmd := exec.CommandContext(ctx, "go", args...)
+		if a.runDir != "" {
+			cmd.Dir = a.runDir
+		}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("go test failed: %s: %v", string(out), err)
+		}
 	}
 
-	// Cleanup generated cover file
-	_ = os.Remove(coverFile)
+	for _, phase := range []string{"clean_cache", "with_cache"} {
+		t.Run(phase, func(t *testing.T) {
+			if phase == "clean_cache" {
+				if out, err := exec.CommandContext(ctx, "go", "clean", "-cache").CombinedOutput(); err != nil {
+					t.Fatalf("failed to clean cache: %s: %v", string(out), err)
+				}
+			}
+
+			for _, a := range apps {
+				t.Run(a.name, func(t *testing.T) {
+					t.Cleanup(func() {
+						for _, f := range a.cleanup {
+							os.Remove(f)
+						}
+					})
+
+					// Get tobari flags
+					flagsCmd := exec.CommandContext(ctx, tobariBin, "flags")
+					if a.flagsDir != "" {
+						flagsCmd.Dir = a.flagsDir
+					}
+					flagsOut, err := flagsCmd.CombinedOutput()
+					if err != nil {
+						t.Fatalf("tobari flags failed: %s: %v", string(flagsOut), err)
+					}
+					tobariFlags := strings.Split(strings.TrimSpace(string(flagsOut)), " ")
+
+					if len(a.runArgs) > 0 {
+						t.Run("go_run", func(t *testing.T) {
+							goRun(t, a, tobariFlags)
+						})
+					}
+					if a.hasTest {
+						t.Run("go_test", func(t *testing.T) {
+							goTest(t, a, tobariFlags)
+						})
+					}
+				})
+			}
+		})
+	}
 }
