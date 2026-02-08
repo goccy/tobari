@@ -33,7 +33,7 @@ func handleCompile(ctx context.Context, toolPath string, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := addTobariPkgsToImportcfgFromCompileOptions(args); err != nil {
+	if err := addTobariPkgsToImportcfgFromCompileOptions(toolPath, args); err != nil {
 		return err
 	}
 	runCommand(toolPath, args)
@@ -48,7 +48,7 @@ func handleCompile(ctx context.Context, toolPath string, args []string) error {
 // there may be cases where it doesn't exist in the importcfg as is.
 // In such cases, if the target test uses github.com/goccy/tobari, linking is possible;
 // however, if it doesn't use it, a tobari package must be created dynamically and its path specified.
-func addTobariPkgsToImportcfgFromCompileOptions(args []string) error {
+func addTobariPkgsToImportcfgFromCompileOptions(toolPath string, args []string) error {
 	importCfgPath := getImportcfgPathFromArgs(args)
 
 	var goFiles []string
@@ -95,7 +95,8 @@ SEARCH_TOBARI_PKG_END:
 		return nil
 	}
 
-	pkgs, err := getTobariPkgs(args)
+	goRoot := goRootFromToolPath(toolPath)
+	pkgs, err := getTobariPkgs(args, goRoot)
 	if err != nil {
 		return err
 	}

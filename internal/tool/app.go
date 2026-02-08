@@ -13,8 +13,8 @@ import (
 	"github.com/goccy/tobari/internal/version"
 )
 
-func buildPackages(ver *version.Version, lang string) (map[string]string, error) {
-	if err := createApp(ver, lang); err != nil {
+func buildPackages(ver *version.Version, lang, goRoot string) (map[string]string, error) {
+	if err := createApp(ver, lang, goRoot); err != nil {
 		return nil, fmt.Errorf("failed to create temp app: %w", err)
 	}
 	path := appPath(ver)
@@ -29,11 +29,16 @@ func buildPackages(ver *version.Version, lang string) (map[string]string, error)
 		}
 		newEnvs = append(newEnvs, kv)
 	}
+	// Set GOROOT to match the toolchain version
+	newEnvs = append(newEnvs, "GOROOT="+goRoot)
+
 	// Get the current tobari binary path for -toolexec
 	tobariPath, err := os.Executable()
 	if err != nil {
 		tobariPath = ""
 	}
+
+	goBin := filepath.Join(goRoot, "bin", "go")
 
 	for _, def := range []struct {
 		name string
@@ -46,9 +51,9 @@ func buildPackages(ver *version.Version, lang string) (map[string]string, error)
 		// Recursion is prevented because tobari packages are already in importcfg when building them
 		var cmd *exec.Cmd
 		if tobariPath != "" {
-			cmd = exec.Command("go", "build", "-o", def.name, "-buildmode=archive", "-toolexec="+tobariPath, def.pkg)
+			cmd = exec.Command(goBin, "build", "-o", def.name, "-buildmode=archive", "-toolexec="+tobariPath, def.pkg)
 		} else {
-			cmd = exec.Command("go", "build", "-o", def.name, "-buildmode=archive", def.pkg)
+			cmd = exec.Command(goBin, "build", "-o", def.name, "-buildmode=archive", def.pkg)
 		}
 		cmd.Dir = path
 		cmd.Env = newEnvs
@@ -61,7 +66,7 @@ func buildPackages(ver *version.Version, lang string) (map[string]string, error)
 	return pkgs, nil
 }
 
-func createApp(ver *version.Version, lang string) error {
+func createApp(ver *version.Version, lang, goRoot string) error {
 	path := appPath(ver)
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return fmt.Errorf("failed to create %s: %w", path, err)
@@ -72,8 +77,10 @@ func createApp(ver *version.Version, lang string) error {
 	if err := createMain(filepath.Join(path, "main.go")); err != nil {
 		return err
 	}
-	cmd := exec.Command("go", "mod", "tidy")
+	goBin := filepath.Join(goRoot, "bin", "go")
+	cmd := exec.Command(goBin, "mod", "tidy")
 	cmd.Dir = path
+	cmd.Env = append(os.Environ(), "GOROOT="+goRoot)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to run 'go mod tidy' for app %s: %s: %w", path, string(out), err)
 	}

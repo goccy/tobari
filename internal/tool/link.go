@@ -11,15 +11,17 @@ func handleLink(ctx context.Context, toolPath string, args []string) error {
 		runCommand(toolPath, args)
 		return nil
 	}
-	if err := addTobariPkgsToImportcfgFromLinkOptions(importCfgPath, args); err != nil {
+	// Extract GOROOT from toolPath for toolchain support
+	goRoot := goRootFromToolPath(toolPath)
+	if err := addTobariPkgsToImportcfgFromLinkOptions(importCfgPath, args, goRoot); err != nil {
 		return err
 	}
 	runCommand(toolPath, args)
 	return nil
 }
 
-func addTobariPkgsToImportcfgFromLinkOptions(importCfgPath string, args []string) error {
-	pkgs, err := getTobariPkgs(args)
+func addTobariPkgsToImportcfgFromLinkOptions(importCfgPath string, args []string, goRoot string) error {
+	pkgs, err := getTobariPkgs(args, goRoot)
 	if err != nil {
 		return err
 	}

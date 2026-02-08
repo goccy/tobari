@@ -316,6 +316,10 @@ func pkgGoFiles(ctx context.Context, srcPath string) ([]string, error) {
 }
 
 func goRoot(ctx context.Context) (string, error) {
+	// Check GOROOT environment variable first (set by toolchain switching)
+	if root := os.Getenv("GOROOT"); root != "" {
+		return root, nil
+	}
 	cmd, err := exec.LookPath("go")
 	if err != nil {
 		return "", fmt.Errorf("failed to find go binary path: %w", err)
