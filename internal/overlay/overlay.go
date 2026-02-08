@@ -331,9 +331,9 @@ func goRoot(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to find go binary path: %w", err)
 	}
-	out, err := exec.CommandContext(ctx, cmd, "env", "GOROOT").CombinedOutput()
+	out, err := exec.CommandContext(ctx, cmd, "env", "GOROOT").Output()
 	if err != nil {
-		return string(out), fmt.Errorf("failed to get GOROOT: %w", err)
+		return "", fmt.Errorf("failed to get GOROOT: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
@@ -355,7 +355,7 @@ func goVersion(ctx context.Context) (string, error) {
 	// Using exec.LookPath("go") would find the system go which may return
 	// a different version when run outside a directory with a toolchain directive.
 	goBin := filepath.Join(root, "bin", "go")
-	out, err := exec.CommandContext(ctx, goBin, "env", "GOVERSION").CombinedOutput()
+	out, err := exec.CommandContext(ctx, goBin, "env", "GOVERSION").Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to get GOVERSION from %s: %w", goBin, err)
 	}
@@ -376,7 +376,7 @@ func collectExportPaths(ctx context.Context, packages []string) (map[string]stri
 	goBin := filepath.Join(root, "bin", "go")
 
 	args := append([]string{"list", "-export", "-json"}, packages...)
-	out, err := exec.CommandContext(ctx, goBin, args...).CombinedOutput()
+	out, err := exec.CommandContext(ctx, goBin, args...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to run go list: %w", err)
 	}
