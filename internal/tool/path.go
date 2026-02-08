@@ -1,34 +1,11 @@
 package tool
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
-
-	"github.com/goccy/tobari/internal/overlay"
 )
-
-func readRuntimePkg() (string, error) {
-	f, err := os.ReadFile(runtimePkgPath())
-	if err != nil {
-		return "", fmt.Errorf("failed to read runtime package archive file path from %s: %w", runtimePkgPath(), err)
-	}
-	return strings.TrimSpace(string(f)), nil
-}
-
-func writeRuntimePkg(b []byte) error {
-	p := runtimePkgPath()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(p, b, 0o600); err != nil {
-		return fmt.Errorf("failed to save runtime package %s: %w", p, err)
-	}
-	return nil
-}
 
 func readTobariPkgs(id int) map[string]string {
 	f, err := os.ReadFile(tobariPkgPathWithID(id))
@@ -69,11 +46,6 @@ func tobariPkgPathWithID(id int) string {
 
 func buildPathWithID(id int) string {
 	return filepath.Join(tobariRoot(), fmt.Sprintf("build%d", id))
-}
-
-func runtimePkgPath() string {
-	dir, _ := overlay.OverlayRootDir(context.Background())
-	return filepath.Join(dir, "runtime_pkg.txt")
 }
 
 // buildID returns a unique ID for each "go build" execution.

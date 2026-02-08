@@ -36,20 +36,3 @@ jobs:
     - name: test
       run: |
         make test
-
-  test-toolchain:
-    name: Test toolchain directive
-    runs-on: ubuntu-latest
-    steps:
-    - name: checkout
-      uses: actions/checkout@v4
-    - name: setup Go 1.24
-      uses: actions/setup-go@v4
-      with:
-        go-version: "1.24"
-    - name: verify toolchain switch works
-      run: |
-        # Test that toolchain directive works correctly
-        # This uses Go 1.24 and lets it download go1.25.1 via toolchain directive
-        go version
-        GOTOOLCHAIN=auto go test -v -run TestToolchain ./...

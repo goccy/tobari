@@ -40,9 +40,6 @@ func handleCompile(ctx context.Context, toolPath string, args []string) error {
 		return err
 	}
 	runCommand(toolPath, args)
-	if err := saveRuntimePkgIfPresent(args); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -268,31 +265,3 @@ func filterCoveragecfg(args []string) ([]string, error) {
 	return ret, nil
 }
 
-// The path from when the runtime package was built is saved and later used when adding it to the importcfg.
-func saveRuntimePkgIfPresent(args []string) error {
-	var (
-		pkgPath      string
-		isRuntimePkg bool
-	)
-	for i := 0; i < len(args); i++ {
-		opt := args[i]
-		switch opt {
-		case "-p":
-			if i+1 < len(args) && args[i+1] == "runtime" {
-				isRuntimePkg = true
-			}
-		case "-o":
-			if i+1 < len(args) {
-				pkgPath = args[i+1]
-			}
-		}
-	}
-	if !isRuntimePkg || pkgPath == "" {
-		return nil
-	}
-
-	if err := writeRuntimePkg([]byte(pkgPath)); err != nil {
-		return err
-	}
-	return nil
-}

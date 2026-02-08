@@ -17,7 +17,7 @@ func buildPackages(ver *version.Version, lang, goRoot string) (map[string]string
 	if err := createApp(ver, lang, goRoot); err != nil {
 		return nil, fmt.Errorf("failed to create temp app: %w", err)
 	}
-	path := appPath(ver)
+	path := appPath(ver, goRoot)
 	pkgs := make(map[string]string)
 	envs := os.Environ()
 	newEnvs := make([]string, 0, len(envs))
@@ -67,11 +67,11 @@ func buildPackages(ver *version.Version, lang, goRoot string) (map[string]string
 }
 
 func createApp(ver *version.Version, lang, goRoot string) error {
-	path := appPath(ver)
+	path := appPath(ver, goRoot)
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return fmt.Errorf("failed to create %s: %w", path, err)
 	}
-	if err := createGoMod(filepath.Join(path, "go.mod"), ver, lang); err != nil {
+	if err := createGoMod(filepath.Join(path, "go.mod"), ver, lang, goRoot); err != nil {
 		return err
 	}
 	if err := createMain(filepath.Join(path, "main.go")); err != nil {
@@ -87,7 +87,7 @@ func createApp(ver *version.Version, lang, goRoot string) error {
 	return nil
 }
 
-func createGoMod(path string, ver *version.Version, lang string) error {
+func createGoMod(path string, ver *version.Version, lang, goRoot string) error {
 	f := new(modfile.File)
 	if err := f.AddModuleStmt("tobari"); err != nil {
 		return fmt.Errorf("failed to add module stmt: %w", err)
@@ -96,9 +96,7 @@ func createGoMod(path string, ver *version.Version, lang string) error {
 	// This ensures consistency when building with toolchain directive
 	goVer := lang
 	if goVer == "" {
-		// Use GOVERSION from environment when lang is not specified
-		// This handles the case where toolchain directive switches Go versions
-		goVer = getGoVersion()
+		goVer = getGoVersion(goRoot)
 	}
 	goVer = strings.TrimPrefix(goVer, "go")
 	if err := f.AddGoStmt(goVer); err != nil {
@@ -168,22 +166,27 @@ func main() {
 	return nil
 }
 
-func appPath(ver *version.Version) string {
+func appPath(ver *version.Version, goRoot string) string {
 	return filepath.Join(
 		tobariRoot(),
-		getGoVersion(),
+		getGoVersion(goRoot),
 		runtime.GOARCH,
 		ver.ID(),
 		fmt.Sprint(os.Getpid()),
 	)
 }
 
-// getGoVersion returns the current Go version from `go env GOVERSION`
-// This handles the case where a toolchain directive switches Go versions
-func getGoVersion() string {
-	out, err := exec.Command("go", "env", "GOVERSION").Output()
+// getGoVersion returns the Go version from the given GOROOT.
+// It first tries to extract the version from the GOROOT path basename
+// (e.g., /usr/local/go1.25.1 -> go1.25.1), then falls back to running
+// $GOROOT/bin/go env GOVERSION for non-standard paths like toolchain directories.
+func getGoVersion(goRoot string) string {
+	base := filepath.Base(goRoot)
+	if len(base) > 2 && strings.HasPrefix(base, "go") && base[2] >= '0' && base[2] <= '9' {
+		return base
+	}
+	out, err := exec.Command(filepath.Join(goRoot, "bin", "go"), "env", "GOVERSION").Output()
 	if err != nil {
-		// Fallback to runtime.Version() if go env fails
 		return runtime.Version()
 	}
 	return strings.TrimSpace(string(out))

@@ -347,7 +347,7 @@ func goVersion(ctx context.Context) (string, error) {
 	}
 	// GOROOT is typically like /usr/local/go1.25.1 or /home/user/sdk/go1.25.1
 	base := filepath.Base(root)
-	if strings.HasPrefix(base, "go") {
+	if len(base) > 2 && strings.HasPrefix(base, "go") && base[2] >= '0' && base[2] <= '9' {
 		return base, nil
 	}
 	// When GOROOT is a toolchain path (e.g., .../toolchain@v0.0.1-go1.25.6.darwin-amd64),
@@ -389,7 +389,7 @@ func collectExportPaths(ctx context.Context, packages []string) (map[string]stri
 			Export     string
 		}
 		if err := decoder.Decode(&pkg); err != nil {
-			continue
+			return nil, fmt.Errorf("failed to decode go list output: %w", err)
 		}
 		if pkg.Export != "" {
 			result[pkg.ImportPath] = pkg.Export
