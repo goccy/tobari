@@ -362,13 +362,14 @@ func collectExportPaths(ctx context.Context, packages []string) (map[string]stri
 		return nil, nil
 	}
 
-	cmd, err := exec.LookPath("go")
+	root, err := goRoot(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find go binary path: %w", err)
+		return nil, err
 	}
+	goBin := filepath.Join(root, "bin", "go")
 
 	args := append([]string{"list", "-export", "-json"}, packages...)
-	out, err := exec.CommandContext(ctx, cmd, args...).CombinedOutput()
+	out, err := exec.CommandContext(ctx, goBin, args...).CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed to run go list: %w", err)
 	}
