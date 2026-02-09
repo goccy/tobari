@@ -249,7 +249,7 @@ func RenderPackage(def *Definition, sourceFiles []string) (*PackageOverlay, erro
 	id := hex.EncodeToString(h.Sum(nil))[:16]
 
 	// Write to deterministic directory
-	dir := filepath.Join(os.TempDir(), "tobari", "builds", utils.BuildID(), "overlay", id)
+	dir := filepath.Join(utils.OverlayDir(), id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create overlay dir: %w", err)
 	}

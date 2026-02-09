@@ -1,8 +1,10 @@
 package tool
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/goccy/tobari/internal/utils"
@@ -10,7 +12,7 @@ import (
 )
 
 func getTobariPkgs(args []string) (map[string]string, error) {
-	if pkgs := readTobariPkgs(utils.BuildID()); pkgs != nil {
+	if pkgs := readTobariPkgs(); pkgs != nil {
 		return pkgs, nil
 	}
 
@@ -24,7 +26,7 @@ func getTobariPkgs(args []string) (map[string]string, error) {
 // createTobariPkgs automatically generate a minimal application for creating tobari pkgs,
 // and save the resulting tobari pkgs and their paths when the application is built.
 func createTobariPkgs(lang string) (map[string]string, error) {
-	if pkgs := readTobariPkgs(utils.BuildID()); pkgs != nil {
+	if pkgs := readTobariPkgs(); pkgs != nil {
 		return pkgs, nil
 	}
 
@@ -81,6 +83,34 @@ func overwriteImportcfg(importCfgPath string, pkgs map[string]string) error {
 	content = newContent + content
 	if err := os.WriteFile(importCfgPath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("failed to write updated importcfg: %w", err)
+	}
+	return nil
+}
+
+func readTobariPkgs() map[string]string {
+	f, err := os.ReadFile(utils.TobariPkgJSONPath())
+	if err != nil {
+		return nil
+	}
+	var res map[string]string
+	if err := json.Unmarshal(f, &res); err != nil {
+		return nil
+	}
+	return res
+}
+
+func writeTobariPkgs(pkgs map[string]string) error {
+	data, err := json.Marshal(pkgs)
+	if err != nil {
+		return fmt.Errorf("failed to encode tobari_pkg.json: %w", err)
+	}
+
+	path := utils.TobariPkgJSONPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
 	}
 	return nil
 }

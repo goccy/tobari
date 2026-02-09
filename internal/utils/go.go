@@ -87,6 +87,24 @@ func GoVersion() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+func GoModTidy(dir string) error {
+	bin, err := GoBin()
+	if err != nil {
+		return err
+	}
+	goRoot, err := GoRoot()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(bin, "mod", "tidy")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GOROOT="+goRoot)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to run 'go mod tidy' for app %s: %s: %w", dir, string(out), err)
+	}
+	return nil
+}
+
 // GoListExportMap runs `go list -export -json` for the given packages
 // and returns a map of import path -> export file path.
 func GoListExportMap(pkgs []string) (map[string]string, error) {
@@ -134,4 +152,16 @@ func ImportsFromSource(src []byte) ([]string, error) {
 		imports = append(imports, v)
 	}
 	return imports, nil
+}
+
+func TobariTempDir() string {
+	return filepath.Join(os.TempDir(), "tobari")
+}
+
+func OverlayDir() string {
+	return filepath.Join(TobariTempDir(), "builds", BuildID(), "overlay")
+}
+
+func TobariPkgJSONPath() string {
+	return filepath.Join(TobariTempDir(), "builds", BuildID(), "tobari_pkg.json")
 }
