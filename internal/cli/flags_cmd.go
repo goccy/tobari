@@ -13,6 +13,6 @@ func (c *CLI) runFlagsCmd(ctx context.Context, tobariBinPath string) error {
 		return err
 	}
 
-	fmt.Fprint(c.stdout, out)
-	return nil
+	_, err = fmt.Fprint(c.stdout, out)
+	return err
 }

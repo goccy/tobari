@@ -29,6 +29,6 @@ For more information, visit: https://github.com/goccy/tobari
 `
 
 func (c *CLI) showHelp() error {
-	fmt.Fprint(c.stdout, helpText)
-	return nil
+	_, err := fmt.Fprint(c.stdout, helpText)
+	return err
 }

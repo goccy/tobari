@@ -15,6 +15,6 @@ func (c *CLI) showVersion() error {
 		}
 	}
 
-	fmt.Fprintf(c.stdout, "tobari version %s\n", ver)
-	return nil
+	_, err := fmt.Fprintf(c.stdout, "tobari version %s\n", ver)
+	return err
 }
