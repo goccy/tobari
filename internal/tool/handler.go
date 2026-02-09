@@ -2,14 +2,11 @@ package tool
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/goccy/tobari/internal/overlay"
@@ -72,27 +69,13 @@ func handleVersionFull(ctx context.Context, toolPath string, args []string) erro
 		return nil
 	}
 
-	// Get the Replace map from overlay.json
-	replace, err := overlay.GetReplace()
+	// Compute overlay content hash on-the-fly (no file I/O)
+	hash, err := overlay.ComputeHash()
 	if err != nil {
-		// If overlay.json doesn't exist, just output the original version
+		// If hash computation fails, just output the original version
 		fmt.Print(string(out))
 		return nil
 	}
-
-	// Compute hash from the Replace map (sorted keys for deterministic output)
-	keys := make([]string, 0, len(replace))
-	for k := range replace {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	h := sha256.New()
-	for _, k := range keys {
-		h.Write([]byte(k))
-		h.Write([]byte(replace[k]))
-	}
-	hash := hex.EncodeToString(h.Sum(nil))[:16]
 
 	// Output version with tobari hash suffix
 	fmt.Printf("%s tobari:%s\n", strings.TrimSpace(string(out)), hash)

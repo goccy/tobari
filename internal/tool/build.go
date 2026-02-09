@@ -5,11 +5,12 @@ import (
 	"os"
 	"strings"
 
+	"github.com/goccy/tobari/internal/utils"
 	"github.com/goccy/tobari/internal/version"
 )
 
 func getTobariPkgs(args []string) (map[string]string, error) {
-	if pkgs := readTobariPkgs(buildID()); pkgs != nil {
+	if pkgs := readTobariPkgs(utils.BuildID()); pkgs != nil {
 		return pkgs, nil
 	}
 
@@ -23,7 +24,7 @@ func getTobariPkgs(args []string) (map[string]string, error) {
 // createTobariPkgs automatically generate a minimal application for creating tobari pkgs,
 // and save the resulting tobari pkgs and their paths when the application is built.
 func createTobariPkgs(lang string) (map[string]string, error) {
-	if pkgs := readTobariPkgs(buildID()); pkgs != nil {
+	if pkgs := readTobariPkgs(utils.BuildID()); pkgs != nil {
 		return pkgs, nil
 	}
 

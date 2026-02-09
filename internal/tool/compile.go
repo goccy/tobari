@@ -12,26 +12,40 @@ import (
 )
 
 func handleCompile(ctx context.Context, toolPath string, args []string) error {
-	// Replace file paths and add new files based on overlay Replace map.
-	// This handles the case where Go's overlay mechanism doesn't work
-	// (e.g., when toolchain is installed in GOMODCACHE).
-	replace, err := overlay.GetReplace()
-	if err != nil {
-		return fmt.Errorf("failed to get overlay replace map: %w", err)
-	}
-	args, addedFiles, err := applyOverlayReplacements(args, replace)
-	if err != nil {
-		return fmt.Errorf("failed to apply overlay replacements: %w", err)
-	}
+	pkgName := getPkgNameFromArgs(args)
 
-	// If new tobari.go files were added, ensure their imports are in the importcfg
-	if len(addedFiles) > 0 {
-		if err := addMissingImportsToImportcfg(ctx, args, addedFiles); err != nil {
+	// Check if this package needs overlay
+	if def, ok := overlay.TargetPackages()[pkgName]; ok {
+		// Collect source files from args
+		var sourceFiles []string
+		for _, arg := range args {
+			if filepath.Ext(arg) == ".go" {
+				sourceFiles = append(sourceFiles, arg)
+			}
+		}
+
+		// Render overlay for this package only
+		pkg, err := overlay.RenderPackage(def, sourceFiles)
+		if err != nil {
+			return fmt.Errorf("failed to render overlay for %s: %w", pkgName, err)
+		}
+
+		// Replace modified file paths in args
+		for i, arg := range args {
+			if newPath, ok := pkg.Replace[arg]; ok {
+				args[i] = newPath
+			}
+		}
+		// Add new tobari.go file
+		args = append(args, pkg.Added...)
+
+		// Add missing imports to importcfg
+		if err := addMissingImportsToImportcfg(args, pkg.Imports); err != nil {
 			return err
 		}
 	}
 
-	args, err = filterCoveragecfg(args)
+	args, err := filterCoveragecfg(args)
 	if err != nil {
 		return err
 	}
@@ -103,71 +117,6 @@ SEARCH_TOBARI_PKG_END:
 	return nil
 }
 
-// applyOverlayReplacements replaces file paths and adds new files based on overlay Replace map.
-// This is essential for toolchain directive support where Go is installed in GOMODCACHE
-// and the standard overlay mechanism may not work correctly.
-// Returns the modified args and a list of new files that were added.
-func applyOverlayReplacements(args []string, replace map[string]string) ([]string, []string, error) {
-	// Build a set of existing file paths in args for quick lookup
-	existingFiles := make(map[string]bool)
-	for _, arg := range args {
-		if filepath.Ext(arg) == ".go" {
-			existingFiles[arg] = true
-			// Also add the absolute path
-			abs, err := filepath.Abs(arg)
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed to get absolute path for %s: %w", arg, err)
-			}
-			existingFiles[abs] = true
-		}
-	}
-
-	// Get the package name from -p flag
-	pkgName := getPkgNameFromArgs(args)
-
-	// Collect new files to add
-	var newFiles []string
-	for origPath, newPath := range replace {
-		// Check if this is a new file (tobari.go) for the current package
-		if strings.HasSuffix(origPath, "/tobari.go") {
-			// Extract package name from origPath
-			// e.g., /usr/local/go/src/runtime/tobari.go -> runtime
-			// e.g., /usr/local/go/src/testing/internal/testdeps/tobari.go -> testing/internal/testdeps
-			if idx := strings.Index(origPath, "/src/"); idx != -1 {
-				pkgFromPath := filepath.Dir(origPath[idx+5:]) // skip "/src/"
-				// Check if this tobari.go belongs to the current package
-				if pkgFromPath == pkgName {
-					// Only add if not already in args
-					if !existingFiles[newPath] {
-						newFiles = append(newFiles, newPath)
-					}
-				}
-			}
-		}
-	}
-
-	// Replace existing file paths in args
-	for i, arg := range args {
-		if filepath.Ext(arg) != ".go" {
-			continue
-		}
-		// Try to match the arg with an original path in replace map
-		absArg, err := filepath.Abs(arg)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to get absolute path for %s: %w", arg, err)
-		}
-		if newPath, ok := replace[absArg]; ok {
-			// Replace with the overlay path if not already replaced
-			if args[i] != newPath {
-				args[i] = newPath
-			}
-		}
-	}
-
-	// Add new files to the compile arguments
-	return append(args, newFiles...), newFiles, nil
-}
-
 func getPkgNameFromArgs(args []string) string {
 	for i := 0; i < len(args); i++ {
 		if args[i] == "-p" && i+1 < len(args) {
@@ -178,8 +127,8 @@ func getPkgNameFromArgs(args []string) string {
 }
 
 // addMissingImportsToImportcfg adds missing import entries to the importcfg
-// for packages imported by newly added tobari.go files.
-func addMissingImportsToImportcfg(ctx context.Context, args []string, addedFiles []string) error {
+// for packages imported by the overlay's tobari.go file.
+func addMissingImportsToImportcfg(args []string, imports []string) error {
 	importCfgPath := getImportcfgPathFromArgs(args)
 	if importCfgPath == "" {
 		return nil
@@ -192,47 +141,32 @@ func addMissingImportsToImportcfg(ctx context.Context, args []string, addedFiles
 	}
 	importCfgContent := string(data)
 
-	// Collect all imports from added files
-	neededImports := make(map[string]bool)
-	for _, filePath := range addedFiles {
-		content, err := os.ReadFile(filePath)
-		if err != nil {
-			return fmt.Errorf("failed to read added file %s: %w", filePath, err)
+	// Find imports that are missing from importcfg
+	var missingImports []string
+	for _, importPath := range imports {
+		if importPath == "unsafe" {
+			continue
 		}
-		imports, err := utils.ImportsFromSource(content)
-		if err != nil {
-			return fmt.Errorf("failed to parse imports from %s: %w", filePath, err)
+		if strings.Contains(importCfgContent, importPath+"=") {
+			continue
 		}
-		for _, importPath := range imports {
-			if strings.Contains(importCfgContent, importPath+"=") {
-				continue
-			}
-			if importPath == "unsafe" {
-				continue
-			}
-			neededImports[importPath] = true
-		}
+		missingImports = append(missingImports, importPath)
 	}
 
-	if len(neededImports) == 0 {
+	if len(missingImports) == 0 {
 		return nil
 	}
 
-	// Get export paths from overlay
-	exportPaths, err := overlay.GetExportPaths()
+	// Get export paths for missing imports via go list
+	exportPaths, err := utils.GoListExportMap(missingImports)
 	if err != nil {
-		return fmt.Errorf("failed to get export paths from overlay: %w", err)
-	}
-	if exportPaths == nil {
-		return nil
+		return fmt.Errorf("failed to get export paths: %w", err)
 	}
 
 	// Build new importcfg entries
 	var newEntries strings.Builder
-	for importPath := range neededImports {
-		if exportPath, ok := exportPaths[importPath]; ok {
-			newEntries.WriteString(fmt.Sprintf("packagefile %s=%s\n", importPath, exportPath))
-		}
+	for importPath, exportPath := range exportPaths {
+		newEntries.WriteString(fmt.Sprintf("packagefile %s=%s\n", importPath, exportPath))
 	}
 
 	if newEntries.Len() == 0 {

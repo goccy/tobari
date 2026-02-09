@@ -12,7 +12,7 @@ Packages imported by these templates must already exist in the dependency graph 
 
 ### Why
 
-tobari does not add `-overlay` to Go's build flags. Instead, it injects template files during compilation via the `-toolexec` handler (`applyOverlayReplacements`). This means Go's build system is unaware of the additional files and their imports. As a result:
+tobari does not add `-overlay` to Go's build flags. Instead, when the `compile` tool is invoked via `-toolexec`, tobari checks if the package being compiled is an overlay target (via `overlay.TargetPackages()`). If so, it renders the overlay on-the-fly for that single package (via `overlay.RenderPackage()`), replacing source files and adding a new `tobari.go` file. This means Go's build system is unaware of the additional files and their imports. As a result:
 
 1. **Compile time**: tobari adds missing imports to the compile-phase `importcfg` using archive paths obtained by `utils.GoListExportMap` (`go list -export -json`, see `internal/utils/go.go`). The compiler only needs type information (export data) from these archives, so fingerprint mismatches do not occur.
 

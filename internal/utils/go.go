@@ -13,6 +13,17 @@ import (
 	"strings"
 )
 
+// BuildID returns a unique ID for each "go build" execution.
+// When TOBARI_BUILD_ID is set (by recursive buildPackages calls),
+// it is used to ensure overlay path consistency across parent and child builds.
+// Otherwise, os.Getppid() is used since toolexec processes are children of "go build".
+func BuildID() string {
+	if id := os.Getenv("TOBARI_BUILD_ID"); id != "" {
+		return id
+	}
+	return strconv.Itoa(os.Getppid())
+}
+
 func GoRoot() (string, error) {
 	// check GOROOT environment variable first (set by toolchain switching)
 	if root := os.Getenv("GOROOT"); root != "" {

@@ -35,6 +35,8 @@ func buildPackages(ver *version.Version, lang string) (map[string]string, error)
 		return nil, fmt.Errorf("failed to get GOROOT: %w", err)
 	}
 	newEnvs = append(newEnvs, "GOROOT="+goRoot)
+	// Propagate buildID so recursive toolexec uses the same overlay directory
+	newEnvs = append(newEnvs, "TOBARI_BUILD_ID="+utils.BuildID())
 
 	tobariPath, err := os.Executable()
 	if err != nil {
