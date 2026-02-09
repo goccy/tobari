@@ -53,41 +53,38 @@ var tmpls embed.FS
 
 const funcSuffix = "tobari"
 
-func definitions() []*Definition {
-	return []*Definition{
-		{
-			PkgPath: "runtime",
-			Functions: []*Function{
-				{Name: "coverage_getCovCounterList"},
-			},
-			Template: "runtime.go.tmpl",
+var defs = []*Definition{
+	{
+		PkgPath: "runtime",
+		Functions: []*Function{
+			{Name: "coverage_getCovCounterList"},
 		},
-		{
-			PkgPath: "testing",
-			Functions: []*Function{
-				{
-					Name: "Run",
-					Method: &Method{
-						Type:    "T",
-						Name:    "t",
-						Pointer: true,
-					},
+		Template: "runtime.go.tmpl",
+	},
+	{
+		PkgPath: "testing",
+		Functions: []*Function{
+			{
+				Name: "Run",
+				Method: &Method{
+					Type:    "T",
+					Name:    "t",
+					Pointer: true,
 				},
 			},
-			Template: "testing.go.tmpl",
 		},
-		{
-			PkgPath:   "testing/internal/testdeps",
-			Functions: []*Function{{Name: "coverTearDown"}},
-			Template:  "testdeps.go.tmpl",
-		},
-	}
+		Template: "testing.go.tmpl",
+	},
+	{
+		PkgPath:   "testing/internal/testdeps",
+		Functions: []*Function{{Name: "coverTearDown"}},
+		Template:  "testdeps.go.tmpl",
+	},
 }
 
 // TargetPackages returns a map of package import paths that need overlay,
 // keyed by PkgPath with the corresponding Definition as value.
 func TargetPackages() map[string]*Definition {
-	defs := definitions()
 	m := make(map[string]*Definition, len(defs))
 	for _, def := range defs {
 		m[def.PkgPath] = def
@@ -98,8 +95,6 @@ func TargetPackages() map[string]*Definition {
 // ComputeHash computes a deterministic content hash of all overlay modifications.
 // It performs all rendering in memory without writing any files.
 func ComputeHash() (string, error) {
-	defs := definitions()
-
 	type entry struct {
 		origPath string
 		content  []byte
@@ -271,8 +266,6 @@ func RenderPackage(def *Definition, sourceFiles []string) (*PackageOverlay, erro
 	}
 
 	tobariPath := filepath.Join(dir, "tobari.go")
-
-	// Parse imports from tobari.go
 	imports, err := utils.ImportsFromSource(tmplContent)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse imports from tobari.go: %w", err)
