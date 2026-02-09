@@ -353,11 +353,10 @@ This will produce an output like the following. Only the coverage related to foo
 Tobari records which Goroutine increased the counter by obtaining the Goroutine ID (GID) and Parent Goroutine ID (PGID) when increasing coverage counters.
 At the same time, when calling the coverage measurement entry function passed to `tobari.Cover` or `tobari.CoverWithName`, it creates a Goroutine and records its ID.
 By tracing Goroutines that have the GID from when coverage measurement started as their parent, it can target only Goroutines related to coverage.
-To implement this functionality, Tobari passes three options during `go build`: `-cover`, `-overlay`, and `-toolexec`.
+To implement this functionality, Tobari passes two options during `go build`: `-cover` and `-toolexec`.
 
 - `-cover`: Added to have the Go compiler determine coverage instrumentation targets
-- `-overlay`: Used to dynamically add APIs to the runtime package for obtaining GID and PGID, which are not public APIs
-- `-toolexec`: Hooks execution of `go tool cover` and similar tools to embed measurement points that include GID and PGID
+- `-toolexec`: Hooks execution of Go build tools to dynamically add APIs to the runtime package for obtaining GID and PGID (which are not public APIs), and to embed measurement points that include GID and PGID
 
 These options are output by the `tobari flags` command, so they can be added to `go build` options by simply specifying `GOFLAGS=$(tobari flags)`.
 
