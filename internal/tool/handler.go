@@ -61,23 +61,17 @@ func runCommand(bin string, args []string) {
 }
 
 func handleVersionFull(ctx context.Context, toolPath string, args []string) error {
-	// Execute the original tool to get version info
-	out, err := exec.CommandContext(ctx, toolPath, args...).Output()
+	org, err := exec.CommandContext(ctx, toolPath, args...).Output()
 	if err != nil {
-		// If the tool fails, just run it normally
-		runCommand(toolPath, args)
-		return nil
+		return fmt.Errorf("failed to run -V=full: %w", err)
 	}
 
-	// Compute overlay content hash on-the-fly (no file I/O)
 	hash, err := overlay.ComputeHash()
 	if err != nil {
-		// If hash computation fails, just output the original version
-		fmt.Print(string(out))
-		return nil
+		return fmt.Errorf("failed to compute overlay hash: %w", err)
 	}
 
 	// Output version with tobari hash suffix
-	fmt.Printf("%s tobari:%s\n", strings.TrimSpace(string(out)), hash)
+	fmt.Printf("%s tobari:%s\n", strings.TrimSpace(string(org)), hash)
 	return nil
 }
