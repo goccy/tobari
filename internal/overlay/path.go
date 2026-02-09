@@ -1,23 +1,23 @@
 package overlay
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 
+	"github.com/goccy/tobari/internal/utils"
 	"github.com/goccy/tobari/internal/version"
 )
 
-func OverlayPath(ctx context.Context) (string, error) {
-	root, err := OverlayRootDir(ctx)
+func OverlayPath() (string, error) {
+	root, err := OverlayRootDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(root, "overlay.json"), nil
 }
 
-func OverlayRootDir(ctx context.Context) (string, error) {
-	goVer, err := goVersion(ctx)
+func OverlayRootDir() (string, error) {
+	goVer, err := utils.GoVersion()
 	if err != nil {
 		return "", err
 	}

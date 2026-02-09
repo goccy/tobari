@@ -73,7 +73,7 @@ func handleVersionFull(ctx context.Context, toolPath string, args []string) erro
 	}
 
 	// Get the Replace map from overlay.json
-	replace, err := overlay.GetReplace(ctx)
+	replace, err := overlay.GetReplace()
 	if err != nil {
 		// If overlay.json doesn't exist, just output the original version
 		fmt.Print(string(out))

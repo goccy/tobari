@@ -16,7 +16,7 @@ func handleCompile(ctx context.Context, toolPath string, args []string) error {
 	// Replace file paths and add new files based on overlay Replace map.
 	// This handles the case where Go's overlay mechanism doesn't work
 	// (e.g., when toolchain is installed in GOMODCACHE).
-	replace, err := overlay.GetReplace(ctx)
+	replace, err := overlay.GetReplace()
 	if err != nil {
 		return fmt.Errorf("failed to get overlay replace map: %w", err)
 	}
@@ -226,7 +226,7 @@ func addMissingImportsToImportcfg(ctx context.Context, args []string, addedFiles
 	}
 
 	// Get export paths from overlay
-	exportPaths, err := overlay.GetExportPaths(ctx)
+	exportPaths, err := overlay.GetExportPaths()
 	if err != nil {
 		return fmt.Errorf("failed to get export paths from overlay: %w", err)
 	}
@@ -264,4 +264,3 @@ func filterCoveragecfg(args []string) ([]string, error) {
 	}
 	return ret, nil
 }
-

@@ -12,13 +12,12 @@ import (
 	"go/format"
 	"go/parser"
 	"go/token"
-	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
-	"strings"
 	"text/template"
+
+	"github.com/goccy/tobari/internal/utils"
 )
 
 func Create(ctx context.Context) (string, error) {
@@ -77,7 +76,7 @@ type Overlay struct {
 var tmpls embed.FS
 
 func createOverlay(ctx context.Context, defs []*Definition) (*Overlay, error) {
-	root, err := OverlayRootDir(ctx)
+	root, err := OverlayRootDir()
 	if err != nil {
 		return nil, err
 	}
@@ -96,14 +95,11 @@ func createOverlay(ctx context.Context, defs []*Definition) (*Overlay, error) {
 	var renderedFiles []renderedFile
 
 	for _, def := range defs {
-		pkgPathStr, err := pkgPath(ctx, def.PkgPath)
+		pkgPathStr, err := utils.GoPkgPath(def.PkgPath)
 		if err != nil {
 			return nil, err
 		}
-		pkgFiles, err := pkgGoFiles(ctx, pkgPathStr)
-		if err != nil {
-			return nil, err
-		}
+		pkgFiles := utils.GoPkgFiles(pkgPathStr)
 		pkgScopedReplacedNameMap := make(map[string]string)
 
 		for _, pkgFile := range pkgFiles {
@@ -181,7 +177,7 @@ func createOverlay(ctx context.Context, defs []*Definition) (*Overlay, error) {
 	overlayMap := make(map[string]string)
 
 	// Collect all imports from tobari.go files
-	allImports := make(map[string]bool)
+	allImports := make(map[string]struct{})
 	for _, rf := range renderedFiles {
 		dirPath := filepath.Join(root, id, rf.pkgPath)
 		if err := os.MkdirAll(dirPath, 0o755); err != nil {
@@ -195,18 +191,18 @@ func createOverlay(ctx context.Context, defs []*Definition) (*Overlay, error) {
 
 		// For tobari.go files, collect their imports
 		if rf.isNew {
-			imports, err := parseImportsFromFile(rf.content)
+			imports, err := utils.ImportsFromSource(rf.content)
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse imports from %s: %w", rf.origPath, err)
 			}
 			for _, imp := range imports {
-				allImports[imp] = true
+				allImports[imp] = struct{}{}
 			}
 		}
 	}
 
 	// Collect export paths for imports
-	var importList []string
+	importList := make([]string, 0, len(allImports))
 	for imp := range allImports {
 		// Skip unsafe as it doesn't have an export file
 		if imp == "unsafe" {
@@ -214,16 +210,16 @@ func createOverlay(ctx context.Context, defs []*Definition) (*Overlay, error) {
 		}
 		importList = append(importList, imp)
 	}
-	exportPaths, err := collectExportPaths(ctx, importList)
+	exportMap, err := utils.GoListExportMap(importList)
 	if err != nil {
 		return nil, fmt.Errorf("failed to collect export paths: %w", err)
 	}
 
-	path, err := OverlayPath(ctx)
+	path, err := OverlayPath()
 	if err != nil {
 		return nil, err
 	}
-	return &Overlay{Replace: overlayMap, ExportPaths: exportPaths, path: path}, nil
+	return &Overlay{Replace: overlayMap, ExportPaths: exportMap, path: path}, nil
 }
 
 type Definition struct {
@@ -294,130 +290,9 @@ func matchedFunc(def *Definition, decl *ast.FuncDecl) *Function {
 	return nil
 }
 
-func pkgPath(ctx context.Context, pkg string) (string, error) {
-	root, err := goRoot(ctx)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(root, "src", pkg), nil
-}
-
-func pkgGoFiles(ctx context.Context, srcPath string) ([]string, error) {
-	var ret []string
-	_ = filepath.Walk(srcPath, func(path string, info fs.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() || filepath.Ext(info.Name()) != ".go" {
-			return nil
-		}
-
-		if strings.HasSuffix(info.Name(), "_test.go") {
-			return nil
-		}
-
-		ret = append(ret, path)
-		return nil
-	})
-	return ret, nil
-}
-
-func goRoot(ctx context.Context) (string, error) {
-	// Check GOROOT environment variable first (set by toolchain switching)
-	if root := os.Getenv("GOROOT"); root != "" {
-		return root, nil
-	}
-	cmd, err := exec.LookPath("go")
-	if err != nil {
-		return "", fmt.Errorf("failed to find go binary path: %w", err)
-	}
-	out, err := exec.CommandContext(ctx, cmd, "env", "GOROOT").Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get GOROOT: %w", err)
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-func goVersion(ctx context.Context) (string, error) {
-	// Get GOROOT and extract version from path
-	// This is more reliable than GOVERSION which depends on go.mod/GOTOOLCHAIN
-	root, err := goRoot(ctx)
-	if err != nil {
-		return "", err
-	}
-	// GOROOT is typically like /usr/local/go1.25.1 or /home/user/sdk/go1.25.1
-	base := filepath.Base(root)
-	if len(base) > 2 && strings.HasPrefix(base, "go") && base[2] >= '0' && base[2] <= '9' {
-		return base, nil
-	}
-	// When GOROOT is a toolchain path (e.g., .../toolchain@v0.0.1-go1.25.6.darwin-amd64),
-	// use the go binary from that GOROOT to get an accurate version.
-	// Using exec.LookPath("go") would find the system go which may return
-	// a different version when run outside a directory with a toolchain directive.
-	goBin := filepath.Join(root, "bin", "go")
-	out, err := exec.CommandContext(ctx, goBin, "env", "GOVERSION").Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get GOVERSION from %s: %w", goBin, err)
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-// collectExportPaths runs `go list -export -json` for the given packages
-// and returns a map of import path -> export file path
-func collectExportPaths(ctx context.Context, packages []string) (map[string]string, error) {
-	if len(packages) == 0 {
-		return nil, nil
-	}
-
-	root, err := goRoot(ctx)
-	if err != nil {
-		return nil, err
-	}
-	goBin := filepath.Join(root, "bin", "go")
-
-	args := append([]string{"list", "-export", "-json"}, packages...)
-	out, err := exec.CommandContext(ctx, goBin, args...).Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to run go list: %w", err)
-	}
-
-	result := make(map[string]string)
-	decoder := json.NewDecoder(bytes.NewReader(out))
-	for decoder.More() {
-		var pkg struct {
-			ImportPath string
-			Export     string
-		}
-		if err := decoder.Decode(&pkg); err != nil {
-			return nil, fmt.Errorf("failed to decode go list output: %w", err)
-		}
-		if pkg.Export != "" {
-			result[pkg.ImportPath] = pkg.Export
-		}
-	}
-	return result, nil
-}
-
-// parseImportsFromFile parses a Go file and returns its imports
-func parseImportsFromFile(content []byte) ([]string, error) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "", content, parser.ImportsOnly)
-	if err != nil {
-		return nil, err
-	}
-
-	var imports []string
-	for _, imp := range file.Imports {
-		// Remove quotes from import path
-		path := strings.Trim(imp.Path.Value, "\"")
-		imports = append(imports, path)
-	}
-	return imports, nil
-}
-
 // GetReplace reads overlay.json and returns the replacement paths.
-func GetReplace(ctx context.Context) (map[string]string, error) {
-	path, err := OverlayPath(ctx)
+func GetReplace() (map[string]string, error) {
+	path, err := OverlayPath()
 	if err != nil {
 		return nil, err
 	}
@@ -436,8 +311,8 @@ func GetReplace(ctx context.Context) (map[string]string, error) {
 }
 
 // GetExportPaths reads overlay.json and returns the export paths for imports
-func GetExportPaths(ctx context.Context) (map[string]string, error) {
-	path, err := OverlayPath(ctx)
+func GetExportPaths() (map[string]string, error) {
+	path, err := OverlayPath()
 	if err != nil {
 		return nil, err
 	}
