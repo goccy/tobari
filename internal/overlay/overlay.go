@@ -99,7 +99,10 @@ func createOverlay(ctx context.Context, defs []*Definition) (*Overlay, error) {
 		if err != nil {
 			return nil, err
 		}
-		pkgFiles := utils.GoPkgFiles(pkgPathStr)
+		pkgFiles, err := utils.GoPkgFiles(pkgPathStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list package files for %s: %w", def.PkgPath, err)
+		}
 		pkgScopedReplacedNameMap := make(map[string]string)
 
 		for _, pkgFile := range pkgFiles {

@@ -3,13 +3,12 @@ package tool
 import (
 	"context"
 	"fmt"
-	"go/parser"
-	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/goccy/tobari/internal/overlay"
+	"github.com/goccy/tobari/internal/utils"
 )
 
 func handleCompile(ctx context.Context, toolPath string, args []string) error {
@@ -36,7 +35,7 @@ func handleCompile(ctx context.Context, toolPath string, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := addTobariPkgsToImportcfgFromCompileOptions(toolPath, args); err != nil {
+	if err := addTobariPkgsToImportcfgFromCompileOptions(args); err != nil {
 		return err
 	}
 	runCommand(toolPath, args)
@@ -48,7 +47,7 @@ func handleCompile(ctx context.Context, toolPath string, args []string) error {
 // there may be cases where it doesn't exist in the importcfg as is.
 // In such cases, if the target test uses github.com/goccy/tobari, linking is possible;
 // however, if it doesn't use it, a tobari package must be created dynamically and its path specified.
-func addTobariPkgsToImportcfgFromCompileOptions(toolPath string, args []string) error {
+func addTobariPkgsToImportcfgFromCompileOptions(args []string) error {
 	importCfgPath := getImportcfgPathFromArgs(args)
 
 	var goFiles []string
@@ -73,17 +72,16 @@ func addTobariPkgsToImportcfgFromCompileOptions(toolPath string, args []string) 
 
 	var usedTobariPkg bool
 	for _, goFile := range goFiles {
-		fset := new(token.FileSet)
-		f, err := os.ReadFile(goFile)
+		src, err := os.ReadFile(goFile)
 		if err != nil {
 			return fmt.Errorf("failed to read file: %w", err)
 		}
-		file, err := parser.ParseFile(fset, "", string(f), parser.ImportsOnly)
+		imports, err := utils.ImportsFromSource(src)
 		if err != nil {
 			return fmt.Errorf("failed to parse file %s: %w", goFile, err)
 		}
-		for _, imprt := range file.Imports {
-			if strings.Contains(imprt.Path.Value, "github.com/goccy/tobari") {
+		for _, imp := range imports {
+			if strings.Contains(imp, "github.com/goccy/tobari") {
 				usedTobariPkg = true
 				goto SEARCH_TOBARI_PKG_END
 			}
@@ -95,8 +93,7 @@ SEARCH_TOBARI_PKG_END:
 		return nil
 	}
 
-	goRoot := goRootFromToolPath(toolPath)
-	pkgs, err := getTobariPkgs(args, goRoot)
+	pkgs, err := getTobariPkgs(args)
 	if err != nil {
 		return err
 	}
@@ -202,18 +199,14 @@ func addMissingImportsToImportcfg(ctx context.Context, args []string, addedFiles
 		if err != nil {
 			return fmt.Errorf("failed to read added file %s: %w", filePath, err)
 		}
-		fset := token.NewFileSet()
-		file, err := parser.ParseFile(fset, "", content, parser.ImportsOnly)
+		imports, err := utils.ImportsFromSource(content)
 		if err != nil {
-			return fmt.Errorf("failed to parse added file %s: %w", filePath, err)
+			return fmt.Errorf("failed to parse imports from %s: %w", filePath, err)
 		}
-		for _, imp := range file.Imports {
-			importPath := strings.Trim(imp.Path.Value, "\"")
-			// Skip if already in importcfg
+		for _, importPath := range imports {
 			if strings.Contains(importCfgContent, importPath+"=") {
 				continue
 			}
-			// Skip unsafe as it doesn't have a package file
 			if importPath == "unsafe" {
 				continue
 			}

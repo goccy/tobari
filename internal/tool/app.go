@@ -10,14 +10,15 @@ import (
 
 	"golang.org/x/mod/modfile"
 
+	"github.com/goccy/tobari/internal/utils"
 	"github.com/goccy/tobari/internal/version"
 )
 
-func buildPackages(ver *version.Version, lang, goRoot string) (map[string]string, error) {
-	if err := createApp(ver, lang, goRoot); err != nil {
+func buildPackages(ver *version.Version, lang string) (map[string]string, error) {
+	if err := createApp(ver, lang); err != nil {
 		return nil, fmt.Errorf("failed to create temp app: %w", err)
 	}
-	path := appPath(ver, goRoot)
+	path := appPath(ver)
 	pkgs := make(map[string]string)
 	envs := os.Environ()
 	newEnvs := make([]string, 0, len(envs))
@@ -29,16 +30,21 @@ func buildPackages(ver *version.Version, lang, goRoot string) (map[string]string
 		}
 		newEnvs = append(newEnvs, kv)
 	}
-	// Set GOROOT to match the toolchain version
+	goRoot, err := utils.GoRoot()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get GOROOT: %w", err)
+	}
 	newEnvs = append(newEnvs, "GOROOT="+goRoot)
 
-	// Get the current tobari binary path for -toolexec
 	tobariPath, err := os.Executable()
 	if err != nil {
 		tobariPath = ""
 	}
 
-	goBin := filepath.Join(goRoot, "bin", "go")
+	goBin, err := utils.GoBin()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get go binary path: %w", err)
+	}
 
 	for _, def := range []struct {
 		name string
@@ -66,18 +72,25 @@ func buildPackages(ver *version.Version, lang, goRoot string) (map[string]string
 	return pkgs, nil
 }
 
-func createApp(ver *version.Version, lang, goRoot string) error {
-	path := appPath(ver, goRoot)
+func createApp(ver *version.Version, lang string) error {
+	path := appPath(ver)
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return fmt.Errorf("failed to create %s: %w", path, err)
 	}
-	if err := createGoMod(filepath.Join(path, "go.mod"), ver, lang, goRoot); err != nil {
+	if err := createGoMod(filepath.Join(path, "go.mod"), ver, lang); err != nil {
 		return err
 	}
 	if err := createMain(filepath.Join(path, "main.go")); err != nil {
 		return err
 	}
-	goBin := filepath.Join(goRoot, "bin", "go")
+	goBin, err := utils.GoBin()
+	if err != nil {
+		return fmt.Errorf("failed to get go binary path: %w", err)
+	}
+	goRoot, err := utils.GoRoot()
+	if err != nil {
+		return fmt.Errorf("failed to get GOROOT: %w", err)
+	}
 	cmd := exec.Command(goBin, "mod", "tidy")
 	cmd.Dir = path
 	cmd.Env = append(os.Environ(), "GOROOT="+goRoot)
@@ -87,16 +100,18 @@ func createApp(ver *version.Version, lang, goRoot string) error {
 	return nil
 }
 
-func createGoMod(path string, ver *version.Version, lang, goRoot string) error {
+func createGoMod(path string, ver *version.Version, lang string) error {
 	f := new(modfile.File)
 	if err := f.AddModuleStmt("tobari"); err != nil {
 		return fmt.Errorf("failed to add module stmt: %w", err)
 	}
-	// Always set go version to match the current running Go version
-	// This ensures consistency when building with toolchain directive
 	goVer := lang
 	if goVer == "" {
-		goVer = getGoVersion(goRoot)
+		v, err := utils.GoVersion()
+		if err != nil {
+			v = runtime.Version()
+		}
+		goVer = v
 	}
 	goVer = strings.TrimPrefix(goVer, "go")
 	if err := f.AddGoStmt(goVer); err != nil {
@@ -166,28 +181,16 @@ func main() {
 	return nil
 }
 
-func appPath(ver *version.Version, goRoot string) string {
+func appPath(ver *version.Version) string {
+	goVer, err := utils.GoVersion()
+	if err != nil {
+		goVer = runtime.Version()
+	}
 	return filepath.Join(
 		tobariRoot(),
-		getGoVersion(goRoot),
+		goVer,
 		runtime.GOARCH,
 		ver.ID(),
 		fmt.Sprint(os.Getpid()),
 	)
-}
-
-// getGoVersion returns the Go version from the given GOROOT.
-// It first tries to extract the version from the GOROOT path basename
-// (e.g., /usr/local/go1.25.1 -> go1.25.1), then falls back to running
-// $GOROOT/bin/go env GOVERSION for non-standard paths like toolchain directories.
-func getGoVersion(goRoot string) string {
-	base := filepath.Base(goRoot)
-	if len(base) > 2 && strings.HasPrefix(base, "go") && base[2] >= '0' && base[2] <= '9' {
-		return base
-	}
-	out, err := exec.Command(filepath.Join(goRoot, "bin", "go"), "env", "GOVERSION").Output()
-	if err != nil {
-		return runtime.Version()
-	}
-	return strings.TrimSpace(string(out))
 }

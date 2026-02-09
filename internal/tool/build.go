@@ -3,24 +3,17 @@ package tool
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/goccy/tobari/internal/version"
 )
 
-// goRootFromToolPath extracts GOROOT from a tool path.
-// Tool paths have the structure: $GOROOT/pkg/tool/$GOOS_$GOARCH/compile (or link)
-func goRootFromToolPath(toolPath string) string {
-	return filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(toolPath))))
-}
-
-func getTobariPkgs(args []string, goRoot string) (map[string]string, error) {
+func getTobariPkgs(args []string) (map[string]string, error) {
 	if pkgs := readTobariPkgs(buildID()); pkgs != nil {
 		return pkgs, nil
 	}
 
-	pkgs, err := createTobariPkgs(getLangFromArgs(args), goRoot)
+	pkgs, err := createTobariPkgs(getLangFromArgs(args))
 	if err != nil {
 		return nil, fmt.Errorf("failed to build temp module: %w", err)
 	}
@@ -29,7 +22,7 @@ func getTobariPkgs(args []string, goRoot string) (map[string]string, error) {
 
 // createTobariPkgs automatically generate a minimal application for creating tobari pkgs,
 // and save the resulting tobari pkgs and their paths when the application is built.
-func createTobariPkgs(lang, goRoot string) (map[string]string, error) {
+func createTobariPkgs(lang string) (map[string]string, error) {
 	if pkgs := readTobariPkgs(buildID()); pkgs != nil {
 		return pkgs, nil
 	}
@@ -38,7 +31,7 @@ func createTobariPkgs(lang, goRoot string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	pkgs, err := buildPackages(ver, lang, goRoot)
+	pkgs, err := buildPackages(ver, lang)
 	if err != nil {
 		return nil, err
 	}

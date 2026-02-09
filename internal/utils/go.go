@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"go/parser"
 	"go/token"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,24 +37,23 @@ func GoPkgPath(pkg string) (string, error) {
 	return filepath.Join(root, "src", pkg), nil
 }
 
-func GoPkgFiles(pkgPath string) []string {
+func GoPkgFiles(pkgPath string) ([]string, error) {
+	entries, err := os.ReadDir(pkgPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read directory %s: %w", pkgPath, err)
+	}
 	var ret []string
-	_ = filepath.Walk(pkgPath, func(path string, info fs.FileInfo, err error) error {
-		if err != nil {
-			return err
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
 		}
-		if info.IsDir() || filepath.Ext(info.Name()) != ".go" {
-			return nil
+		name := entry.Name()
+		if filepath.Ext(name) != ".go" || strings.HasSuffix(name, "_test.go") {
+			continue
 		}
-
-		if strings.HasSuffix(info.Name(), "_test.go") {
-			return nil
-		}
-
-		ret = append(ret, path)
-		return nil
-	})
-	return ret
+		ret = append(ret, filepath.Join(pkgPath, name))
+	}
+	return ret, nil
 }
 
 func GoBin() (string, error) {
