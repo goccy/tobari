@@ -24,8 +24,7 @@ func run(ctx context.Context, args []string) error {
 
 	tobariBinPath := args[0]
 	if len(args) >= 2 && args[1] == "flags" {
-		fix := len(args) == 3 && args[2] == "--fix"
-		out, err := flags.Run(ctx, tobariBinPath, fix)
+		out, err := flags.Run(ctx, tobariBinPath)
 		if err != nil {
 			return err
 		}
