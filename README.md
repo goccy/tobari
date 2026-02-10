@@ -348,6 +348,50 @@ This will produce an output like the following. Only the coverage related to foo
 <img width="803" height="200" alt="Image" src="https://github.com/user-attachments/assets/f9b8fdf4-7d66-4e18-b9a0-af12dc06ff44" />
 <img width="418" height="223" alt="Image" src="https://github.com/user-attachments/assets/ca52ac83-10aa-47a0-99b4-fb72fe1d863a" />
 
+## Using with `go test`
+
+Tobari can also be used with `go test` to collect coverage data. When running tests with tobari, coverage metadata is written to a `tobari/tobari.json` file.
+
+### Basic Usage
+
+```console
+GOFLAGS="$(tobari flags)" go test ./...
+```
+
+This will create a `tobari/tobari.json` file in the current directory.
+
+### Specifying Output Directory
+
+You can use the `TOBARI_COVERDIR` environment variable to specify where the coverage data should be written:
+
+```console
+TOBARI_COVERDIR=/path/to/output GOFLAGS="$(tobari flags)" go test ./...
+```
+
+This will create `/path/to/output/tobari/tobari.json`.
+
+### Using with `go test -c`
+
+When building a test binary with `go test -c`, you can specify `TOBARI_COVERDIR` at runtime:
+
+```console
+# Build the test binary
+GOFLAGS="$(tobari flags)" go test -c .
+
+# Run with default output (current directory)
+./pkg.test
+
+# Run with custom output directory
+TOBARI_COVERDIR=/path/to/output ./pkg.test
+```
+
+| Scenario | Output Location |
+|----------|-----------------|
+| `go test ./...` | `./tobari/tobari.json` |
+| `TOBARI_COVERDIR=dir go test ./...` | `dir/tobari/tobari.json` |
+| `go test -c && ./pkg.test` | `./tobari/tobari.json` |
+| `go test -c && TOBARI_COVERDIR=dir ./pkg.test` | `dir/tobari/tobari.json` |
+
 ## How It Works
 
 Tobari records which Goroutine increased the counter by obtaining the Goroutine ID (GID) and Parent Goroutine ID (PGID) when increasing coverage counters.
