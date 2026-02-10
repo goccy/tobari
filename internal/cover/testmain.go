@@ -66,3 +66,4 @@ func addTobariImportStmt(file *ast.File) {
 		},
 	}, file.Decls...)
 }
+

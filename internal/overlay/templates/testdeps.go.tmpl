@@ -17,7 +17,10 @@ import (
 func coverProfileMap(string) map[string]string
 
 func coverTearDown(coverprofile string, gocoverdir string) (string, error) {
-	gocoverDir := os.Getenv("GOCOVERDIR")
+	gocoverDir := os.Getenv("TOBARI_COVERDIR")
+	if gocoverDir == "" {
+		gocoverDir = "."
+	}
 	m := coverProfileMap("set")
 	b, err := json.Marshal(m)
 	if err != nil {
