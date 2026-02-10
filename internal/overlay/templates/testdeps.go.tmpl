@@ -13,15 +13,55 @@ import (
 	"internal/coverage/slicewriter"
 )
 
-//go:linkname coverProfileMap github.com/goccy/tobari/internal/tobari.CoverProfileMap
-func coverProfileMap(string) map[string]string
+//go:linkname coverEntriesMap github.com/goccy/tobari/internal/tobari.CoverEntriesMap
+func coverEntriesMap() map[string][]*CoverEntry
+
+type CoverEntry struct {
+	FileName  string
+	StartLine int
+	StartCol  int
+	EndLine   int
+	EndCol    int
+	NumStmts  int
+	Count     int
+}
+
+type Entry struct {
+	FileName       string
+	Start          EntryPos
+	End            EntryPos
+	StatementCount int
+	Count          int
+}
+
+type EntryPos struct {
+	Line   int
+	Column int
+}
+
+func toEntryMap(m map[string][]*CoverEntry) map[string][]*Entry {
+	ret := make(map[string][]*Entry, len(m))
+	for k, entries := range m {
+		ret[k] = make([]*Entry, 0, len(entries))
+		for _, e := range entries {
+			ret[k] = append(ret[k], &Entry{
+				FileName:       e.FileName,
+				Start:          EntryPos{Line: e.StartLine, Column: e.StartCol},
+				End:            EntryPos{Line: e.EndLine, Column: e.EndCol},
+				StatementCount: e.NumStmts,
+				Count:          e.Count,
+			})
+		}
+	}
+	return ret
+}
 
 func coverTearDown(coverprofile string, gocoverdir string) (string, error) {
 	gocoverDir := os.Getenv("TOBARI_COVERDIR")
 	if gocoverDir == "" {
 		gocoverDir = "."
 	}
-	m := coverProfileMap("set")
+	m := toEntryMap(coverEntriesMap())
 	b, err := json.Marshal(m)
 	if err != nil {
 		return "", err
