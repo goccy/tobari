@@ -255,3 +255,80 @@ func TestCacheBehavior(t *testing.T) {
 		})
 	}
 }
+
+// TestFingerprintConsistency verifies that running go test with tobari multiple times
+// produces consistent package fingerprints, allowing the Go build cache to work correctly.
+//
+// Background:
+// Go computes package fingerprints (hashes) that include file paths of source files.
+// When tobari modifies runtime/testing packages via overlay, the overlay file paths
+// must be consistent across builds. If the paths change (e.g., include a build ID),
+// the fingerprints will differ, causing "fingerprint mismatch" errors like:
+//
+//	fingerprint mismatch: runtime/coverage has X, import from testing expecting Y
+//
+// This test verifies that:
+// 1. First go test with tobari succeeds (builds everything)
+// 2. Second go test with tobari succeeds (uses cached packages with consistent fingerprints)
+func TestFingerprintConsistency(t *testing.T) {
+	ctx := t.Context()
+	tobariBin := filepath.Join(t.TempDir(), "tobari")
+
+	// Build tobari
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+
+	// Get tobari flags
+	flagsCmd := exec.CommandContext(ctx, tobariBin, "flags")
+	flagsCmd.Dir = "testdata/notobari"
+	flagsOut, err := flagsCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("tobari flags failed: %s: %v", string(flagsOut), err)
+	}
+	tobariFlags := strings.Split(strings.TrimSpace(string(flagsOut)), " ")
+
+	// Use a unique TOBARI_BUILD_ID for this test to isolate from other tests
+	buildID := "test-fingerprint-" + t.Name()
+
+	env := os.Environ()
+	env = append(env, "GOFLAGS="+strings.Join(tobariFlags, " "))
+	env = append(env, "TOBARI_BUILD_ID="+buildID)
+
+	// Clean go build cache for a fresh start
+	if out, err := exec.CommandContext(ctx, "go", "clean", "-cache").CombinedOutput(); err != nil {
+		t.Fatalf("failed to clean cache: %s: %v", string(out), err)
+	}
+
+	// First run: builds everything including overlay-modified runtime/testing packages
+	cmd1 := exec.CommandContext(ctx, "go", "test", ".", "-count=1")
+	cmd1.Env = env
+	cmd1.Dir = "testdata/notobari"
+	if out, err := cmd1.CombinedOutput(); err != nil {
+		t.Fatalf("first go test failed: %s: %v", string(out), err)
+	}
+
+	// Second run: should use cached packages
+	// Before the fix, this would fail with "fingerprint mismatch" because
+	// the overlay directory path included BuildID which changed between runs,
+	// causing different fingerprints for the same package content.
+	cmd2 := exec.CommandContext(ctx, "go", "test", ".", "-count=1")
+	cmd2.Env = env
+	cmd2.Dir = "testdata/notobari"
+	out, err := cmd2.CombinedOutput()
+	if err != nil {
+		// Check if this is a fingerprint mismatch error
+		if strings.Contains(string(out), "fingerprint mismatch") {
+			t.Fatalf("fingerprint mismatch detected - overlay paths are not consistent: %s", string(out))
+		}
+		t.Fatalf("second go test failed: %s: %v", string(out), err)
+	}
+
+	// Third run: verify it continues to work
+	cmd3 := exec.CommandContext(ctx, "go", "test", ".", "-count=1")
+	cmd3.Env = env
+	cmd3.Dir = "testdata/notobari"
+	if out, err := cmd3.CombinedOutput(); err != nil {
+		t.Fatalf("third go test failed: %s: %v", string(out), err)
+	}
+}

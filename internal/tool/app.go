@@ -112,15 +112,5 @@ func main() {}
 }
 
 func appPath(ver *version.Version) string {
-	goVer, err := utils.GoVersion()
-	if err != nil {
-		goVer = runtime.Version()
-	}
-	return filepath.Join(
-		utils.TobariTempDir(),
-		goVer,
-		runtime.GOARCH,
-		ver.ID(),
-		fmt.Sprint(os.Getpid()),
-	)
+	return utils.AppPath()
 }

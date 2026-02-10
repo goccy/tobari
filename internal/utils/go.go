@@ -198,9 +198,13 @@ func TobariTempDir() string {
 }
 
 func OverlayDir() string {
-	return filepath.Join(TobariTempDir(), "builds", BuildID(), "overlay")
+	return filepath.Join(TobariTempDir(), "overlay")
 }
 
 func TobariPkgJSONPath() string {
 	return filepath.Join(TobariTempDir(), "builds", BuildID(), "tobari_pkg.json")
+}
+
+func AppPath() string {
+	return filepath.Join(TobariTempDir(), "builds", BuildID(), "app", strconv.Itoa(os.Getpid()))
 }
