@@ -1,11 +1,19 @@
 ---
-name: tobari
-description: Analyze test coverage data from tobari.toon and help improve test coverage. Use when the user has run go test with tobari enabled (e.g., `GOFLAGS="$(tobari flags)" go test ./...`) and wants to improve test coverage, find duplicate tests, or increase code coverage percentage. Triggers on phrases like "tobari", "improve coverage", "coverage analysis", "find duplicate tests", "increase test coverage", or after running go test with tobari flags.
+name: tobari-coverage-improver
+description: Analyze test coverage data from tobari.toon and help improve test coverage incrementally. Use when the user has run go test with tobari enabled (e.g., `GOFLAGS="$(tobari flags)" go test ./...`) and wants to improve test coverage or increase code coverage percentage. Triggers on phrases like "improve coverage", "increase coverage", "coverage improvement", or "add more tests".
 ---
 
 # Improve Test Coverage
 
 This skill analyzes test coverage data from tobari and helps improve test coverage incrementally.
+
+## Prerequisites
+
+Ensure you have run tests with tobari enabled:
+
+```bash
+GOFLAGS="$(tobari flags)" go test ./...
+```
 
 ## How to Read Coverage Data
 
@@ -35,50 +43,7 @@ TestName[N]{FileName,StartLine,StartCol,EndLine,EndCol,StatementCount,Count}:
   - StatementCount: number of statements in this block
   - Count: execution count (0 = not covered)
 
-## Step 1: Detect Duplicate Test Cases
-
-Compare coverage entries between all test cases to find tests that cover nearly identical code paths.
-
-### Calculate Match Rate
-
-For each pair of tests (TestA, TestB):
-
-1. Create a set of "coverage signatures" for each test:
-   - Signature = `FileName:StartLine:StartCol:EndLine:EndCol:IsCovered`
-   - IsCovered = 1 if Count > 0, else 0
-
-2. Calculate match rate:
-   ```
-   CommonSignatures = signatures in both TestA and TestB with same IsCovered value
-   AllSignatures = union of all signatures from both tests
-   MatchRate = len(CommonSignatures) / len(AllSignatures) * 100
-   ```
-
-3. If MatchRate > 95%, these tests are considered duplicates
-
-### Action for Duplicates
-
-If duplicate test pairs are found:
-
-1. List all test pairs with >95% match rate, showing:
-   - Test names
-   - Match percentage
-   - Number of shared coverage entries
-
-2. Use AskUserQuestion to ask the user:
-   - Question: "The following test pairs cover almost identical code paths. Which test(s) would you like to remove?"
-   - Options for each duplicate pair, plus "Keep all tests"
-
-3. If user selects tests to remove:
-   - Find the test file containing those tests
-   - Delete the selected test functions
-   - Re-run tests with tobari to verify
-
-4. If no duplicates found or user chooses to keep all, proceed to Step 2
-
-## Step 2: Improve Coverage Incrementally
-
-### Calculate Current Coverage
+## Calculate Current Coverage
 
 1. Collect all unique coverage entries across all tests:
    - Key = `FileName:StartLine:StartCol:EndLine:EndCol`
@@ -95,6 +60,8 @@ If duplicate test pairs are found:
    ```
    Current coverage: XX.X% (Y of Z statements covered)
    ```
+
+## Improve Coverage Incrementally
 
 ### Set Target and Improve
 
