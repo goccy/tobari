@@ -1,8 +1,13 @@
 package tobari
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	_ "embed"
 	"fmt"
 	"io"
+	"path/filepath"
 	"runtime"
 
 	"github.com/goccy/tobari/internal/tobari"
@@ -171,3 +176,40 @@ func toEntry(e *tobari.CoverEntry) *Entry {
 		Count:          e.Count,
 	}
 }
+
+// ReadCoverArchivedFile extracts the original source files embedded during
+// coverage instrumentation and returns them as a tar.gz archive.
+// Returns nil if no sources were embedded.
+func ReadCoverArchivedFile() (io.Reader, error) {
+	sources := tobari.GetEmbeddedSources()
+	if len(sources) == 0 {
+		return nil, nil
+	}
+
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+
+	for origPath, content := range sources {
+		hdr := &tar.Header{
+			Name: filepath.ToSlash(origPath),
+			Mode: 0o600,
+			Size: int64(len(content)),
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return nil, err
+		}
+		if _, err := tw.Write(content); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	if err := gw.Close(); err != nil {
+		return nil, err
+	}
+	return &buf, nil
+}
+

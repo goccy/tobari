@@ -332,3 +332,53 @@ func TestFingerprintConsistency(t *testing.T) {
 		t.Fatalf("third go test failed: %s: %v", string(out), err)
 	}
 }
+
+func TestEmbedCode(t *testing.T) {
+	ctx := t.Context()
+	tmpDir := t.TempDir()
+	tobariBin := filepath.Join(tmpDir, "tobari-test")
+
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+
+	// Get tobari flags with -E (embed-code)
+	flagsOut, err := exec.CommandContext(ctx, tobariBin, "flags", "-E").CombinedOutput()
+	if err != nil {
+		t.Fatalf("tobari flags -E failed: %s: %v", string(flagsOut), err)
+	}
+	tobariFlags := strings.TrimSpace(string(flagsOut))
+
+	// Build the embedcode test program
+	testBin := filepath.Join(tmpDir, "embedcode-test")
+	buildCmd := exec.CommandContext(ctx, "go", "build", "-o", testBin, "testdata/embedcode/main.go")
+	buildCmd.Env = append(os.Environ(), "GOFLAGS="+tobariFlags)
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build with -E failed: %s: %v", string(out), err)
+	}
+
+	// Run the built binary
+	out, err := exec.CommandContext(ctx, testBin).CombinedOutput()
+	if err != nil {
+		t.Fatalf("embedcode binary failed: %s: %v", string(out), err)
+	}
+
+	output := strings.TrimSpace(string(out))
+	if output == "NO_SOURCES" {
+		t.Fatal("ReadCoverArchivedFile returned nil; expected embedded sources")
+	}
+
+	// Verify that the archive contains files
+	lines := strings.Split(output, "\n")
+	if len(lines) == 0 {
+		t.Fatal("no files in archive")
+	}
+
+	// Verify all entries are .go file paths
+	for _, line := range lines {
+		if !strings.HasSuffix(line, ".go") {
+			t.Errorf("unexpected archive entry: %s", line)
+		}
+	}
+	t.Logf("embedded %d source files:\n%s", len(lines), output)
+}

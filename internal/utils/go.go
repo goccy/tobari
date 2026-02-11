@@ -142,9 +142,34 @@ func GoListExportMap(pkgs []string) (map[string]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to run go list: %w", err)
 	}
+	return parseGoListExportJSON(out)
+}
 
+// GoListDepsExport runs `go list -deps -export -json` with the given toolexec
+// in the specified directory. It returns all transitive dependencies with their
+// export file paths.
+func GoListDepsExport(dir string, toolexec string, pkg string) (map[string]string, error) {
+	bin, err := GoBin()
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"list", "-deps", "-export", "-json", "-toolexec=" + toolexec, pkg}
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = dir
+	cmd.Env = append(
+		filterGOFLAGSEnvs(),
+		tobariBuildIDEnv+"="+BuildID(),
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to run go list -deps: %w", err)
+	}
+	return parseGoListExportJSON(out)
+}
+
+func parseGoListExportJSON(data []byte) (map[string]string, error) {
 	ret := make(map[string]string)
-	decoder := json.NewDecoder(bytes.NewReader(out))
+	decoder := json.NewDecoder(bytes.NewReader(data))
 	for decoder.More() {
 		var pkg struct {
 			ImportPath string

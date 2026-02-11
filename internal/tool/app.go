@@ -24,20 +24,42 @@ func buildPackages(ver *version.Version, lang string) (map[string]string, error)
 		return nil, fmt.Errorf("failed to get tobari binary path: %w", err)
 	}
 
-	for _, def := range []struct {
+	tobariPkgs := []struct {
 		name string
 		pkg  string
 	}{
 		{name: "tobari.pkg", pkg: "github.com/goccy/tobari"},
 		{name: "internal_tobari.pkg", pkg: "github.com/goccy/tobari/internal/tobari"},
-	} {
-		// Build with -toolexec to ensure consistent fingerprints with modified runtime
-		// Recursion is prevented because tobari packages are already in importcfg when building them
+	}
+
+	for _, def := range tobariPkgs {
+		// Build with -toolexec to ensure consistent fingerprints with modified runtime.
+		// Recursion is prevented because tobari packages are already in importcfg when building them.
 		if err := utils.GoBuild(path, "-o", def.name, "-buildmode=archive", "-toolexec="+tobariPath, def.pkg); err != nil {
 			return nil, err
 		}
 		pkgs[def.pkg] = filepath.Join(path, def.name)
 	}
+
+	// Write preliminary tobari_pkg.json so that sub-invocations of tobari
+	// (from the go list below) can find the built archives without recursion.
+	if err := writeTobariPkgs(pkgs); err != nil {
+		return nil, err
+	}
+
+	// Collect all transitive dependencies with their export paths.
+	// This ensures packages like archive/tar (needed by tobari_archive.go)
+	// are available in the link importcfg even if the user's code doesn't use them.
+	deps, err := utils.GoListDepsExport(path, tobariPath, "github.com/goccy/tobari")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tobari deps: %w", err)
+	}
+	for pkg, exportPath := range deps {
+		if _, ok := pkgs[pkg]; !ok {
+			pkgs[pkg] = exportPath
+		}
+	}
+
 	return pkgs, nil
 }
 

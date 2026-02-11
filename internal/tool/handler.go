@@ -12,7 +12,7 @@ import (
 	"github.com/goccy/tobari/internal/overlay"
 )
 
-func Handle(ctx context.Context, args []string) error {
+func Handle(ctx context.Context, args []string, embedCode bool) error {
 	toolPath := args[1]
 	toolArgs := args[2:]
 
@@ -24,7 +24,7 @@ func Handle(ctx context.Context, args []string) error {
 	toolName := filepath.Base(toolPath)
 	switch toolName {
 	case "compile":
-		if err := handleCompile(ctx, toolPath, toolArgs); err != nil {
+		if err := handleCompile(ctx, toolPath, toolArgs, embedCode); err != nil {
 			return err
 		}
 	case "vet":
@@ -36,7 +36,7 @@ func Handle(ctx context.Context, args []string) error {
 			return err
 		}
 	case "cover":
-		if err := handleCover(ctx, toolPath, toolArgs); err != nil {
+		if err := handleCover(ctx, toolPath, toolArgs, embedCode); err != nil {
 			return err
 		}
 	default:

@@ -17,9 +17,15 @@ Flags:
     -v, --version    Show version information
     -h, --help       Show this help message
 
+Flags Command Options:
+    --embed-code, -E    Embed original source code into the instrumented binary
+
 Examples:
     # Get flags for go build
     go build $(tobari flags) ./...
+
+    # Get flags with embedded source code
+    go build $(tobari flags -E) ./...
 
     # Show version
     tobari version

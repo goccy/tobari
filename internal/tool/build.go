@@ -74,13 +74,20 @@ func overwriteImportcfg(importCfgPath string, pkgs map[string]string) error {
 		return nil
 	}
 
-	newContent := ""
+	var newEntries strings.Builder
 	for importPath, pkgPath := range pkgs {
-		tobariEntry := fmt.Sprintf("packagefile %s=%s\n", importPath, pkgPath)
-		newContent += tobariEntry
+		// Skip packages that already exist in the importcfg
+		if strings.Contains(content, "packagefile "+importPath+"=") {
+			continue
+		}
+		fmt.Fprintf(&newEntries, "packagefile %s=%s\n", importPath, pkgPath)
 	}
 
-	content = newContent + content
+	if newEntries.Len() == 0 {
+		return nil
+	}
+
+	content = newEntries.String() + content
 	if err := os.WriteFile(importCfgPath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("failed to write updated importcfg: %w", err)
 	}
