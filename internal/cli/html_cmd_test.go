@@ -99,7 +99,7 @@ func createSourceTarGz(t *testing.T, dir, srcPath string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	gw := gzip.NewWriter(f)
 	tw := tar.NewWriter(gw)
@@ -262,7 +262,7 @@ func TestRunHTMLCmd_DefaultOutput(t *testing.T) {
 	if err := os.Chdir(outDir); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chdir(origDir)
+	defer func() { _ = os.Chdir(origDir) }()
 
 	var stdout, stderr bytes.Buffer
 	c := &CLI{stdout: &stdout, stderr: &stderr}

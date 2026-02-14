@@ -62,7 +62,7 @@ func (c *CLI) runHTMLCmd(ctx context.Context, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to create temp dir: %w", err)
 		}
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
 		tarGzPath := *sources
 		if *binary != "" {
@@ -85,10 +85,10 @@ func (c *CLI) runHTMLCmd(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp coverprofile: %w", err)
 	}
-	defer os.Remove(tmpCoverprofile.Name())
+	defer func() { _ = os.Remove(tmpCoverprofile.Name()) }()
 
 	if _, err := tmpCoverprofile.WriteString(coverprofileContent); err != nil {
-		tmpCoverprofile.Close()
+		_ = tmpCoverprofile.Close()
 		return fmt.Errorf("failed to write temp coverprofile: %w", err)
 	}
 	if err := tmpCoverprofile.Close(); err != nil {
@@ -170,13 +170,13 @@ func extractTarGz(tarGzPath, destDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open %s: %w", tarGzPath, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	gr, err := gzip.NewReader(f)
 	if err != nil {
 		return fmt.Errorf("failed to create gzip reader: %w", err)
 	}
-	defer gr.Close()
+	defer func() { _ = gr.Close() }()
 
 	tr := tar.NewReader(gr)
 	for {
@@ -202,7 +202,7 @@ func extractTarGz(tarGzPath, destDir string) error {
 			if err != nil {
 				return fmt.Errorf("failed to create %s: %w", target, err)
 			}
-			defer out.Close()
+			defer func() { _ = out.Close() }()
 
 			if _, err := io.Copy(out, tr); err != nil {
 				return fmt.Errorf("failed to write %s: %w", target, err)
