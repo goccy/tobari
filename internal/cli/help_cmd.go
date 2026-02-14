@@ -10,6 +10,7 @@ Usage:
 
 Commands:
     flags       Output flags for go build/test with coverage
+    extract     Extract embedded source code from an instrumented binary
     version     Show version information
     help        Show this help message
 
@@ -35,6 +36,9 @@ Examples:
 
     # Use tobari directly as toolexec with source embedding
     go build -cover -toolexec='tobari --embed-code' ./...
+
+    # Extract embedded sources from an instrumented binary
+    tobari extract -o sources.tar.gz ./my-binary
 
     # Show version
     tobari version

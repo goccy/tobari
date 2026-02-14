@@ -1,11 +1,16 @@
 package tobari
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
 	"maps"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -569,4 +574,75 @@ func GetEmbeddedSources() map[string]string {
 	embeddedSourcesMu.Lock()
 	defer embeddedSourcesMu.Unlock()
 	return embeddedSourceMap
+}
+
+// ExtractEmbeddedSourcesIfRequested checks the TOBARI_EXTRACT_SOURCES environment
+// variable. If set, it writes all embedded sources as a tar.gz archive to the
+// specified path and exits the process. This is called via go:linkname from the
+// main package's init function when the binary was built with --embed-code.
+func ExtractEmbeddedSourcesIfRequested() {
+	outputPath := os.Getenv("TOBARI_EXTRACT_SOURCES")
+	if outputPath == "" {
+		return
+	}
+
+	embeddedSourcesMu.Lock()
+	sources := embeddedSourceMap
+	embeddedSourcesMu.Unlock()
+
+	if len(sources) == 0 {
+		fmt.Fprintln(os.Stderr, "tobari: no embedded sources found")
+		os.Exit(1)
+	}
+
+	if err := writeEmbeddedSourcesArchive(outputPath, sources); err != nil {
+		fmt.Fprintf(os.Stderr, "tobari: %v\n", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+func writeEmbeddedSourcesArchive(outputPath string, sources map[string]string) error {
+	f, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create %s: %w", outputPath, err)
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	gw := gzip.NewWriter(f)
+	tw := tar.NewWriter(gw)
+
+	for origPath, compressed := range sources {
+		gr, err := gzip.NewReader(strings.NewReader(compressed))
+		if err != nil {
+			return fmt.Errorf("failed to create gzip reader: %s: %w", origPath, err)
+		}
+		content, err := io.ReadAll(gr)
+		if err != nil {
+			return fmt.Errorf("failed to read content from %s: %w", origPath, err)
+		}
+		if err := gr.Close(); err != nil {
+			return fmt.Errorf("failed to close: %s: %w", origPath, err)
+		}
+		if err := tw.WriteHeader(&tar.Header{
+			Name: filepath.ToSlash(origPath),
+			Mode: 0o600,
+			Size: int64(len(content)),
+		}); err != nil {
+			return fmt.Errorf("failed to write header: %s: %w", origPath, err)
+		}
+		if _, err := tw.Write(content); err != nil {
+			return fmt.Errorf("failed to write content: %s: %w", origPath, err)
+		}
+	}
+
+	if err := tw.Close(); err != nil {
+		return fmt.Errorf("failed to close tar writer: %w", err)
+	}
+	if err := gw.Close(); err != nil {
+		return fmt.Errorf("failed to close gzip writer: %w", err)
+	}
+	return nil
 }
