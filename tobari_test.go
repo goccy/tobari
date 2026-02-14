@@ -1,9 +1,12 @@
 package tobari_test
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -368,17 +371,30 @@ func TestEmbedCode(t *testing.T) {
 		t.Fatal("ReadCoverArchivedFile returned nil; expected embedded sources")
 	}
 
-	// Verify that the archive contains files
-	lines := strings.Split(output, "\n")
-	if len(lines) == 0 {
-		t.Fatal("no files in archive")
+	// Build expected "name\thash" lines from actual source files
+	goFiles, err := filepath.Glob("testdata/embedcode/*.go")
+	if err != nil {
+		t.Fatalf("failed to glob testdata/embedcode: %v", err)
 	}
-
-	// Verify all entries are .go file paths
-	for _, line := range lines {
-		if !strings.HasSuffix(line, ".go") {
-			t.Errorf("unexpected archive entry: %s", line)
+	var expected []string
+	for _, f := range goFiles {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", f, err)
 		}
+		absPath, err := filepath.Abs(f)
+		if err != nil {
+			t.Fatalf("failed to get abs path for %s: %v", f, err)
+		}
+		h := sha256.Sum256(data)
+		expected = append(expected, fmt.Sprintf("%s\t%x", filepath.ToSlash(absPath), h))
 	}
-	t.Logf("embedded %d source files:\n%s", len(lines), output)
+	sort.Strings(expected)
+
+	actual := strings.Split(output, "\n")
+	sort.Strings(actual)
+
+	if diff := cmp.Diff(expected, actual); diff != "" {
+		t.Fatalf("embedded files mismatch (-expected +actual):\n%s", diff)
+	}
 }

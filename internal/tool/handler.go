@@ -24,7 +24,7 @@ func Handle(ctx context.Context, args []string, embedCode bool) error {
 	toolName := filepath.Base(toolPath)
 	switch toolName {
 	case "compile":
-		if err := handleCompile(ctx, toolPath, toolArgs, embedCode); err != nil {
+		if err := handleCompile(ctx, toolPath, toolArgs); err != nil {
 			return err
 		}
 	case "vet":

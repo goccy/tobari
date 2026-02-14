@@ -2,13 +2,12 @@ package tobari
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
-	_ "embed"
 	"fmt"
 	"io"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/goccy/tobari/internal/tobari"
 )
@@ -180,36 +179,58 @@ func toEntry(e *tobari.CoverEntry) *Entry {
 // ReadCoverArchivedFile extracts the original source files embedded during
 // coverage instrumentation and returns them as a tar.gz archive.
 // Returns nil if no sources were embedded.
+// Each embedded source is stored as a gzip-compressed const string in rodata.
+// Decompression and tar construction are streamed via io.Pipe so that
+// only one file's content is in memory at a time.
 func ReadCoverArchivedFile() (io.Reader, error) {
 	sources := tobari.GetEmbeddedSources()
 	if len(sources) == 0 {
 		return nil, nil
 	}
 
-	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gw)
+	pr, pw := io.Pipe()
+	go func() {
+		gw := gzip.NewWriter(pw)
+		tw := tar.NewWriter(gw)
 
-	for origPath, content := range sources {
-		hdr := &tar.Header{
-			Name: filepath.ToSlash(origPath),
-			Mode: 0o600,
-			Size: int64(len(content)),
-		}
-		if err := tw.WriteHeader(hdr); err != nil {
-			return nil, err
-		}
-		if _, err := tw.Write(content); err != nil {
-			return nil, err
-		}
-	}
+		var err error
+		for origPath, compressed := range sources {
+			// Decompress from rodata string via strings.NewReader (zero-copy)
+			gr, e := gzip.NewReader(strings.NewReader(compressed))
+			if e != nil {
+				err = fmt.Errorf("gzip decompress %s: %w", origPath, e)
+				break
+			}
+			content, e := io.ReadAll(gr)
+			gr.Close()
+			if e != nil {
+				err = fmt.Errorf("read %s: %w", origPath, e)
+				break
+			}
 
-	if err := tw.Close(); err != nil {
-		return nil, err
-	}
-	if err := gw.Close(); err != nil {
-		return nil, err
-	}
-	return &buf, nil
+			hdr := &tar.Header{
+				Name: filepath.ToSlash(origPath),
+				Mode: 0o600,
+				Size: int64(len(content)),
+			}
+			if e := tw.WriteHeader(hdr); e != nil {
+				err = e
+				break
+			}
+			if _, e := tw.Write(content); e != nil {
+				err = e
+				break
+			}
+		}
+
+		if err == nil {
+			err = tw.Close()
+		}
+		if err == nil {
+			err = gw.Close()
+		}
+		pw.CloseWithError(err)
+	}()
+	return pr, nil
 }
 
