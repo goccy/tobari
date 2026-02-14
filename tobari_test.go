@@ -291,12 +291,8 @@ func TestFingerprintConsistency(t *testing.T) {
 	}
 	tobariFlags := strings.Split(strings.TrimSpace(string(flagsOut)), " ")
 
-	// Use a unique TOBARI_BUILD_ID for this test to isolate from other tests
-	buildID := "test-fingerprint-" + t.Name()
-
 	env := os.Environ()
 	env = append(env, "GOFLAGS="+strings.Join(tobariFlags, " "))
-	env = append(env, "TOBARI_BUILD_ID="+buildID)
 
 	// Clean go build cache for a fresh start
 	if out, err := exec.CommandContext(ctx, "go", "clean", "-cache").CombinedOutput(); err != nil {

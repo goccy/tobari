@@ -14,10 +14,7 @@ import (
 )
 
 func main() {
-	reader, err := tobari.ReadCoverArchivedFile()
-	if err != nil {
-		log.Fatal(err)
-	}
+	reader := tobari.ReadCoverArchivedFile()
 	if reader == nil {
 		fmt.Println("NO_SOURCES")
 		os.Exit(0)

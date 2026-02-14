@@ -3,6 +3,7 @@ package tobari
 import (
 	"archive/tar"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -182,10 +183,11 @@ func toEntry(e *tobari.CoverEntry) *Entry {
 // Each embedded source is stored as a gzip-compressed const string in rodata.
 // Decompression and tar construction are streamed via io.Pipe so that
 // only one file's content is in memory at a time.
-func ReadCoverArchivedFile() (io.Reader, error) {
+// Errors during streaming are reported through the returned io.Reader.
+func ReadCoverArchivedFile() io.Reader {
 	sources := tobari.GetEmbeddedSources()
 	if len(sources) == 0 {
-		return nil, nil
+		return nil
 	}
 
 	pr, pw := io.Pipe()
@@ -193,44 +195,38 @@ func ReadCoverArchivedFile() (io.Reader, error) {
 		gw := gzip.NewWriter(pw)
 		tw := tar.NewWriter(gw)
 
-		var err error
 		for origPath, compressed := range sources {
 			// Decompress from rodata string via strings.NewReader (zero-copy)
-			gr, e := gzip.NewReader(strings.NewReader(compressed))
-			if e != nil {
-				err = fmt.Errorf("gzip decompress %s: %w", origPath, e)
-				break
-			}
-			content, e := io.ReadAll(gr)
-			gr.Close()
-			if e != nil {
-				err = fmt.Errorf("read %s: %w", origPath, e)
-				break
-			}
-
-			hdr := &tar.Header{
-				Name: filepath.ToSlash(origPath),
-				Mode: 0o600,
-				Size: int64(len(content)),
-			}
-			if e := tw.WriteHeader(hdr); e != nil {
-				err = e
-				break
-			}
-			if _, e := tw.Write(content); e != nil {
-				err = e
-				break
+			if err := func() error {
+				gr, err := gzip.NewReader(strings.NewReader(compressed))
+				if err != nil {
+					return fmt.Errorf("failed to create gzip reader: %s: %w", origPath, err)
+				}
+				content, err := io.ReadAll(gr)
+				if err != nil {
+					return fmt.Errorf("failed to read content from %s: %w", origPath, err)
+				}
+				if err := gr.Close(); err != nil {
+					return fmt.Errorf("failed to close: %s: %w", origPath, err)
+				}
+				if err := tw.WriteHeader(&tar.Header{
+					Name: filepath.ToSlash(origPath),
+					Mode: 0o600,
+					Size: int64(len(content)),
+				}); err != nil {
+					return fmt.Errorf("failed to write header: %s: %w", origPath, err)
+				}
+				if _, err := tw.Write(content); err != nil {
+					return fmt.Errorf("failed to write content: %s: %w", origPath, err)
+				}
+				return nil
+			}(); err != nil {
+				pw.CloseWithError(err)
+				return
 			}
 		}
 
-		if err == nil {
-			err = tw.Close()
-		}
-		if err == nil {
-			err = gw.Close()
-		}
-		pw.CloseWithError(err)
+		pw.CloseWithError(errors.Join(tw.Close(), gw.Close()))
 	}()
-	return pr, nil
+	return pr
 }
-

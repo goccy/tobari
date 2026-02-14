@@ -13,18 +13,6 @@ import (
 	"strings"
 )
 
-const tobariBuildIDEnv = "TOBARI_BUILD_ID"
-
-// BuildID returns a unique ID for each "go build" execution.
-// When TOBARI_BUILD_ID is set (by recursive buildPackages calls),
-// it is used to ensure overlay path consistency across parent and child builds.
-// Otherwise, os.Getppid() is used since toolexec processes are children of "go build".
-func BuildID() string {
-	if id := os.Getenv(tobariBuildIDEnv); id != "" {
-		return id
-	}
-	return strconv.Itoa(os.Getppid())
-}
 
 func GoRoot() (string, error) {
 	// check GOROOT environment variable first (set by toolchain switching)
@@ -107,24 +95,6 @@ func GoModTidy(dir string) error {
 	return nil
 }
 
-func GoBuild(path string, args ...string) error {
-	goBin, err := GoBin()
-	if err != nil {
-		return fmt.Errorf("failed to get go binary path: %w", err)
-	}
-	cmd := exec.Command(goBin, append([]string{"build"}, args...)...)
-	cmd.Dir = path
-	cmd.Env = append(
-		filterGOFLAGSEnvs(),
-		tobariBuildIDEnv+"="+BuildID(),
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to build %s: %w", string(out), err)
-	}
-	return nil
-}
-
 // GoListExportMap runs `go list -export -json` for the given packages
 // and returns a map of import path -> export file path.
 func GoListExportMap(pkgs []string) (map[string]string, error) {
@@ -134,9 +104,8 @@ func GoListExportMap(pkgs []string) (map[string]string, error) {
 	}
 	args := append([]string{"list", "-export", "-json"}, pkgs...)
 	cmd := exec.Command(bin, args...)
-	// Without this, go list would invoke tobari recursively with a different
-	// BuildID, causing overlay files to be at different paths, which leads to
-	// fingerprint mismatches at link time.
+	// Strip GOFLAGS to prevent tobari's -toolexec from being inherited,
+	// which would cause recursive invocations.
 	cmd.Env = filterGOFLAGSEnvs()
 	out, err := cmd.Output()
 	if err != nil {
@@ -156,10 +125,7 @@ func GoListDepsExport(dir string, toolexec string, pkg string) (map[string]strin
 	args := []string{"list", "-deps", "-export", "-json", "-toolexec=" + toolexec, pkg}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
-	cmd.Env = append(
-		filterGOFLAGSEnvs(),
-		tobariBuildIDEnv+"="+BuildID(),
-	)
+	cmd.Env = filterGOFLAGSEnvs()
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to run go list -deps: %w", err)
@@ -226,10 +192,6 @@ func OverlayDir() string {
 	return filepath.Join(TobariTempDir(), "overlay")
 }
 
-func TobariPkgJSONPath() string {
-	return filepath.Join(TobariTempDir(), "builds", BuildID(), "tobari_pkg.json")
-}
-
 func AppPath() string {
-	return filepath.Join(TobariTempDir(), "builds", BuildID(), "app", strconv.Itoa(os.Getpid()))
+	return filepath.Join(TobariTempDir(), "app", strconv.Itoa(os.Getppid()))
 }

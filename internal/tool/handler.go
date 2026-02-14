@@ -2,7 +2,10 @@ package tool
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,7 +21,7 @@ func Handle(ctx context.Context, args []string, embedCode bool) error {
 
 	// Handle -V=full flag to isolate build cache
 	if slices.Contains(toolArgs, "-V=full") {
-		return handleVersionFull(ctx, toolPath, toolArgs)
+		return handleVersionFull(ctx, toolPath, toolArgs, embedCode)
 	}
 
 	toolName := filepath.Base(toolPath)
@@ -60,18 +63,47 @@ func runCommand(bin string, args []string) {
 	}
 }
 
-func handleVersionFull(ctx context.Context, toolPath string, args []string) error {
+func handleVersionFull(ctx context.Context, toolPath string, args []string, embedCode bool) error {
 	org, err := exec.CommandContext(ctx, toolPath, args...).Output()
 	if err != nil {
 		return fmt.Errorf("failed to run -V=full: %w", err)
 	}
 
-	hash, err := overlay.ComputeHash()
+	overlayHash, err := overlay.ComputeHash()
 	if err != nil {
 		return fmt.Errorf("failed to compute overlay hash: %w", err)
 	}
 
-	// Output version with tobari hash suffix
-	fmt.Printf("%s tobari:%s\n", strings.TrimSpace(string(org)), hash)
+	exeHash, err := executableHash()
+	if err != nil {
+		return fmt.Errorf("failed to compute executable hash: %w", err)
+	}
+
+	// Output version with tobari hashes; Go uses this as part of the build cache key.
+	// - overlayHash: invalidates cache when overlay files change (e.g., Go version update)
+	// - exeHash: invalidates cache when the tobari binary changes (e.g., new tobari release)
+	// - embedCode: separates cache between embed and non-embed builds
+	fmt.Printf("%s tobari:%s exe:%s embed:%v\n",
+		strings.TrimSpace(string(org)), overlayHash, exeHash, embedCode)
 	return nil
+}
+
+func executableHash() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	f, err := os.Open(exe)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		_ = f.Close()
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

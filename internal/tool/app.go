@@ -14,75 +14,34 @@ import (
 )
 
 func buildPackages(ver *version.Version, lang string) (map[string]string, error) {
-	if err := createApp(ver, lang); err != nil {
-		return nil, fmt.Errorf("failed to create temp app: %w", err)
+	appDir := appPath(ver)
+	// Skip createApp if the directory was already prepared by a prior toolexec
+	// invocation within the same build (compile and link share the same PPID).
+	if _, err := os.Stat(filepath.Join(appDir, "go.sum")); err != nil {
+		if err := createApp(ver, lang); err != nil {
+			return nil, fmt.Errorf("failed to create temp app: %w", err)
+		}
 	}
-	path := appPath(ver)
-	pkgs := make(map[string]string)
 	tobariPath, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tobari binary path: %w", err)
 	}
 
-	tobariPkgs := []struct {
-		name string
-		pkg  string
-	}{
-		{name: "tobari.pkg", pkg: "github.com/goccy/tobari"},
-		{name: "internal_tobari.pkg", pkg: "github.com/goccy/tobari/internal/tobari"},
-	}
-
-	for _, def := range tobariPkgs {
-		// Build with -toolexec to ensure consistent fingerprints with modified runtime.
-		// Recursion is prevented because tobari packages are already in importcfg when building them.
-		if err := utils.GoBuild(path, "-o", def.name, "-buildmode=archive", "-toolexec="+tobariPath, def.pkg); err != nil {
-			return nil, err
-		}
-		pkgs[def.pkg] = filepath.Join(path, def.name)
-	}
-
-	// Write preliminary tobari_pkg.json so that sub-invocations of tobari
-	// (from the go list below) can find the built archives without recursion.
-	if err := writeTobariPkgs(pkgs); err != nil {
-		return nil, err
-	}
-
-	// Collect all transitive dependencies with their export paths.
-	// This ensures packages like archive/tar (needed by tobari.go)
-	// are available in the link importcfg even if the user's code doesn't use them.
-	deps, err := utils.GoListDepsExport(path, tobariPath, "github.com/goccy/tobari")
+	// Use go list -deps -export with -toolexec=tobari to compile and get export paths
+	// for github.com/goccy/tobari and all its transitive dependencies.
+	//
+	// The temp app's go.mod ensures the correct version of tobari is resolved:
+	//   - Released version: require github.com/goccy/tobari <version>
+	//   - Development:      replace github.com/goccy/tobari => <local path>
+	//
+	// Using Go's build cache paths directly (instead of building separate archives)
+	// guarantees that compile and link steps always reference the same package files,
+	// preventing fingerprint mismatches when Go's build cache replays cached results.
+	pkgs, err := utils.GoListDepsExport(appDir, tobariPath, "github.com/goccy/tobari")
 	if err != nil {
-		return nil, fmt.Errorf("failed to get tobari deps: %w", err)
+		return nil, fmt.Errorf("failed to get tobari packages: %w", err)
 	}
-
-	// Copy dep archives to the tobari temp directory so they survive `go clean -cache`.
-	// The export paths from GoListDepsExport point to the Go build cache, which can be
-	// cleaned at any time. By copying them to our own directory, the paths remain valid.
-	depsDir := filepath.Join(utils.TobariTempDir(), "builds", utils.BuildID(), "deps")
-	if err := os.MkdirAll(depsDir, 0o755); err != nil {
-		return nil, fmt.Errorf("failed to create deps dir: %w", err)
-	}
-	for pkg, exportPath := range deps {
-		if _, ok := pkgs[pkg]; ok {
-			continue
-		}
-		localName := strings.ReplaceAll(pkg, "/", "_") + ".a"
-		localPath := filepath.Join(depsDir, localName)
-		if err := copyFile(exportPath, localPath); err != nil {
-			return nil, fmt.Errorf("failed to copy dep %s: %w", pkg, err)
-		}
-		pkgs[pkg] = localPath
-	}
-
 	return pkgs, nil
-}
-
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0o644)
 }
 
 func createApp(ver *version.Version, lang string) error {
