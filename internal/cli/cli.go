@@ -32,12 +32,25 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 	}
 
 	tobariBinPath := args[0]
+
+	// Detect --embed-code flag for toolexec mode
+	// When invoked as: tobari --embed-code /path/to/compile <args>
+	embedCode := false
+	if len(args) > 1 && args[1] == "--embed-code" {
+		embedCode = true
+		args = append(args[:1], args[2:]...) // remove --embed-code
+	}
+
+	if len(args) < 2 {
+		return c.showHelp()
+	}
+
 	arg1 := args[1]
 
 	// Check if this is a toolexec call
 	// toolexec passes Go tool's absolute path as args[1]
 	if isToolexecCall(arg1) {
-		return tool.Handle(ctx, args)
+		return tool.Handle(ctx, args, embedCode)
 	}
 
 	// Handle flags (starts with "-")
@@ -46,7 +59,7 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 	}
 
 	// Handle subcommands
-	return c.handleSubcommand(ctx, tobariBinPath, arg1)
+	return c.handleSubcommand(ctx, tobariBinPath, arg1, args[2:])
 }
 
 // isToolexecCall determines if the argument is a toolexec invocation
@@ -83,10 +96,10 @@ func (c *CLI) handleFlags(ctx context.Context, args []string) error {
 }
 
 // handleSubcommand processes subcommands
-func (c *CLI) handleSubcommand(ctx context.Context, tobariBinPath, cmd string) error {
+func (c *CLI) handleSubcommand(ctx context.Context, tobariBinPath, cmd string, args []string) error {
 	switch cmd {
 	case "flags":
-		return c.runFlagsCmd(ctx, tobariBinPath)
+		return c.runFlagsCmd(ctx, tobariBinPath, args)
 	case "version":
 		return c.showVersion()
 	case "help":

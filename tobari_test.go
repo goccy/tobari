@@ -1,9 +1,12 @@
 package tobari_test
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -288,12 +291,8 @@ func TestFingerprintConsistency(t *testing.T) {
 	}
 	tobariFlags := strings.Split(strings.TrimSpace(string(flagsOut)), " ")
 
-	// Use a unique TOBARI_BUILD_ID for this test to isolate from other tests
-	buildID := "test-fingerprint-" + t.Name()
-
 	env := os.Environ()
 	env = append(env, "GOFLAGS="+strings.Join(tobariFlags, " "))
-	env = append(env, "TOBARI_BUILD_ID="+buildID)
 
 	// Clean go build cache for a fresh start
 	if out, err := exec.CommandContext(ctx, "go", "clean", "-cache").CombinedOutput(); err != nil {
@@ -330,5 +329,68 @@ func TestFingerprintConsistency(t *testing.T) {
 	cmd3.Dir = "testdata/notobari"
 	if out, err := cmd3.CombinedOutput(); err != nil {
 		t.Fatalf("third go test failed: %s: %v", string(out), err)
+	}
+}
+
+func TestEmbedCode(t *testing.T) {
+	ctx := t.Context()
+	tmpDir := t.TempDir()
+	tobariBin := filepath.Join(tmpDir, "tobari-test")
+
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+
+	// Get tobari flags with -E (embed-code)
+	flagsOut, err := exec.CommandContext(ctx, tobariBin, "flags", "-E").CombinedOutput()
+	if err != nil {
+		t.Fatalf("tobari flags -E failed: %s: %v", string(flagsOut), err)
+	}
+	tobariFlags := strings.TrimSpace(string(flagsOut))
+
+	// Build the embedcode test program
+	testBin := filepath.Join(tmpDir, "embedcode-test")
+	buildCmd := exec.CommandContext(ctx, "go", "build", "-o", testBin, "testdata/embedcode/main.go")
+	buildCmd.Env = append(os.Environ(), "GOFLAGS="+tobariFlags)
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build with -E failed: %s: %v", string(out), err)
+	}
+
+	// Run the built binary
+	out, err := exec.CommandContext(ctx, testBin).CombinedOutput()
+	if err != nil {
+		t.Fatalf("embedcode binary failed: %s: %v", string(out), err)
+	}
+
+	output := strings.TrimSpace(string(out))
+	if output == "NO_SOURCES" {
+		t.Fatal("ReadCoverArchivedFile returned nil; expected embedded sources")
+	}
+
+	// Build expected "name\thash" lines from actual source files
+	goFiles, err := filepath.Glob("testdata/embedcode/*.go")
+	if err != nil {
+		t.Fatalf("failed to glob testdata/embedcode: %v", err)
+	}
+	var expected []string
+	for _, f := range goFiles {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", f, err)
+		}
+		absPath, err := filepath.Abs(f)
+		if err != nil {
+			t.Fatalf("failed to get abs path for %s: %v", f, err)
+		}
+		h := sha256.Sum256(data)
+		expected = append(expected, fmt.Sprintf("%s\t%x", filepath.ToSlash(absPath), h))
+	}
+	sort.Strings(expected)
+
+	actual := strings.Split(output, "\n")
+	sort.Strings(actual)
+
+	if diff := cmp.Diff(expected, actual); diff != "" {
+		t.Fatalf("embedded files mismatch (-expected +actual):\n%s", diff)
 	}
 }

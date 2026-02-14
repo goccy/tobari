@@ -17,9 +17,24 @@ Flags:
     -v, --version    Show version information
     -h, --help       Show this help message
 
+Flags Command Options:
+    --embed-code, -E    Embed original source code into the instrumented binary
+
+Toolexec Options (used with -toolexec):
+    --embed-code        Embed original source code into the instrumented binary
+
 Examples:
     # Get flags for go build
     go build $(tobari flags) ./...
+
+    # Get flags with embedded source code
+    go build $(tobari flags -E) ./...
+
+    # Use tobari directly as toolexec
+    go build -cover -toolexec=tobari ./...
+
+    # Use tobari directly as toolexec with source embedding
+    go build -cover -toolexec='tobari --embed-code' ./...
 
     # Show version
     tobari version

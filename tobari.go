@@ -1,9 +1,14 @@
 package tobari
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/goccy/tobari/internal/tobari"
 )
@@ -170,4 +175,58 @@ func toEntry(e *tobari.CoverEntry) *Entry {
 		StatementCount: e.NumStmts,
 		Count:          e.Count,
 	}
+}
+
+// ReadCoverArchivedFile extracts the original source files embedded during
+// coverage instrumentation and returns them as a tar.gz archive.
+// Returns nil if no sources were embedded.
+// Each embedded source is stored as a gzip-compressed const string in rodata.
+// Decompression and tar construction are streamed via io.Pipe so that
+// only one file's content is in memory at a time.
+// Errors during streaming are reported through the returned io.Reader.
+func ReadCoverArchivedFile() io.Reader {
+	sources := tobari.GetEmbeddedSources()
+	if len(sources) == 0 {
+		return nil
+	}
+
+	pr, pw := io.Pipe()
+	go func() {
+		gw := gzip.NewWriter(pw)
+		tw := tar.NewWriter(gw)
+
+		for origPath, compressed := range sources {
+			// Decompress from rodata string via strings.NewReader (zero-copy)
+			if err := func() error {
+				gr, err := gzip.NewReader(strings.NewReader(compressed))
+				if err != nil {
+					return fmt.Errorf("failed to create gzip reader: %s: %w", origPath, err)
+				}
+				content, err := io.ReadAll(gr)
+				if err != nil {
+					return fmt.Errorf("failed to read content from %s: %w", origPath, err)
+				}
+				if err := gr.Close(); err != nil {
+					return fmt.Errorf("failed to close: %s: %w", origPath, err)
+				}
+				if err := tw.WriteHeader(&tar.Header{
+					Name: filepath.ToSlash(origPath),
+					Mode: 0o600,
+					Size: int64(len(content)),
+				}); err != nil {
+					return fmt.Errorf("failed to write header: %s: %w", origPath, err)
+				}
+				if _, err := tw.Write(content); err != nil {
+					return fmt.Errorf("failed to write content: %s: %w", origPath, err)
+				}
+				return nil
+			}(); err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+		}
+
+		pw.CloseWithError(errors.Join(tw.Close(), gw.Close()))
+	}()
+	return pr
 }

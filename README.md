@@ -136,6 +136,29 @@ GOFLAGS="$(tobari flags)" go build .
 This example shows distinguishing coverage results by name, but you can also use it the same way as `runtime/coverage`.
 For specific APIs, please [refer here](https://pkg.go.dev/github.com/goccy/tobari).
 
+### Embedding Source Code
+
+Tobari supports embedding the original source code into instrumented binaries with the `--embed-code` (`-E`) option. This is useful for archiving the exact source that was compiled, enabling offline coverage analysis without access to the original source tree.
+
+```console
+# Using tobari flags
+GOFLAGS="$(tobari flags -E)" go build .
+
+# Using tobari directly as toolexec
+go build -cover -toolexec='tobari --embed-code' ./...
+```
+
+To retrieve the embedded sources at runtime, use `ReadCoverArchivedFile()`:
+
+```go
+reader := tobari.ReadCoverArchivedFile()
+if reader == nil {
+    // No sources were embedded
+    return
+}
+// reader provides a tar.gz archive of the original source files
+```
+
 # Example
 
 We will use a more practical example to give you a better idea of how to use tobari. The example code is located in examples/http, so you can run it on your own environment as well.

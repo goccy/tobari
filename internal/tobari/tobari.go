@@ -543,3 +543,30 @@ func EncodeCounters() ([]byte, error) {
 	}
 	return json.Marshal(allFnCounters)
 }
+
+var (
+	embeddedSourcesMu sync.Mutex
+	embeddedSourceMap map[string]string // original path → gzip-compressed content (rodata string)
+)
+
+// AddEmbeddedSource is called via go:linkname from each instrumented package's
+// covervars.go at init time (same timing as AddCoverMeta).
+// origPath is the original absolute path of the source file.
+// content is a gzip-compressed string stored in rodata.
+func AddEmbeddedSource(origPath string, content string) bool {
+	embeddedSourcesMu.Lock()
+	if embeddedSourceMap == nil {
+		embeddedSourceMap = make(map[string]string)
+	}
+	embeddedSourceMap[origPath] = content
+	embeddedSourcesMu.Unlock()
+	return true
+}
+
+// GetEmbeddedSources returns all embedded source files as a map of
+// original path → gzip-compressed content. Returns nil if no sources were embedded.
+func GetEmbeddedSources() map[string]string {
+	embeddedSourcesMu.Lock()
+	defer embeddedSourcesMu.Unlock()
+	return embeddedSourceMap
+}

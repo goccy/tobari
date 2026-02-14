@@ -14,29 +14,32 @@ import (
 )
 
 func buildPackages(ver *version.Version, lang string) (map[string]string, error) {
-	if err := createApp(ver, lang); err != nil {
-		return nil, fmt.Errorf("failed to create temp app: %w", err)
+	appDir := appPath(ver)
+	// Skip createApp if the directory was already prepared by a prior toolexec
+	// invocation within the same build (compile and link share the same PPID).
+	if _, err := os.Stat(filepath.Join(appDir, "go.sum")); err != nil {
+		if err := createApp(ver, lang); err != nil {
+			return nil, fmt.Errorf("failed to create temp app: %w", err)
+		}
 	}
-	path := appPath(ver)
-	pkgs := make(map[string]string)
 	tobariPath, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tobari binary path: %w", err)
 	}
 
-	for _, def := range []struct {
-		name string
-		pkg  string
-	}{
-		{name: "tobari.pkg", pkg: "github.com/goccy/tobari"},
-		{name: "internal_tobari.pkg", pkg: "github.com/goccy/tobari/internal/tobari"},
-	} {
-		// Build with -toolexec to ensure consistent fingerprints with modified runtime
-		// Recursion is prevented because tobari packages are already in importcfg when building them
-		if err := utils.GoBuild(path, "-o", def.name, "-buildmode=archive", "-toolexec="+tobariPath, def.pkg); err != nil {
-			return nil, err
-		}
-		pkgs[def.pkg] = filepath.Join(path, def.name)
+	// Use go list -deps -export with -toolexec=tobari to compile and get export paths
+	// for github.com/goccy/tobari and all its transitive dependencies.
+	//
+	// The temp app's go.mod ensures the correct version of tobari is resolved:
+	//   - Released version: require github.com/goccy/tobari <version>
+	//   - Development:      replace github.com/goccy/tobari => <local path>
+	//
+	// Using Go's build cache paths directly (instead of building separate archives)
+	// guarantees that compile and link steps always reference the same package files,
+	// preventing fingerprint mismatches when Go's build cache replays cached results.
+	pkgs, err := utils.GoListDepsExport(appDir, tobariPath, "github.com/goccy/tobari")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tobari packages: %w", err)
 	}
 	return pkgs, nil
 }
