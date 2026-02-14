@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"strings"
 
 	"github.com/goccy/tobari/internal/flags"
 )
@@ -15,6 +16,11 @@ func (c *CLI) runFlagsCmd(ctx context.Context, tobariBinPath string, args []stri
 
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	for _, arg := range fs.Args() {
+		if strings.HasPrefix(arg, "-") {
+			return fmt.Errorf("flags must be specified before other arguments\nUsage: tobari flags [--embed-code | -E]")
+		}
 	}
 
 	out, err := flags.Run(ctx, tobariBinPath, *embedCode)

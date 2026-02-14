@@ -171,6 +171,36 @@ This runs the instrumented binary internally, extracts all embedded source files
 
 The extraction hook is injected at compile time into the main package, so it works regardless of `-coverpkg` settings. When the `TOBARI_EXTRACT_SOURCES` environment variable is set (which `tobari extract` does internally), the binary writes the archive and exits immediately without running the application's main function.
 
+### Generating HTML Coverage Reports
+
+The `tobari html` command generates an HTML coverage report from a coverprofile or `tobari.json` file. It wraps `go tool cover -html` and adds support for tobari's JSON format and source resolution from embedded binaries or tar.gz archives.
+
+```console
+# Generate HTML from a coverprofile
+tobari html -o coverage.html profile.cover
+
+# Generate HTML from tobari.json (merges all test entries with summed counts)
+tobari html -o coverage.html tobari.json
+```
+
+When the source code is not available locally (e.g., on a CI server or a different machine), you can use the `-b` or `-s` flags to provide the source files needed for HTML generation:
+
+```console
+# Use embedded sources from a tobari-built binary
+tobari html -o coverage.html -b ./my-binary profile.cover
+
+# Use sources from a previously extracted tar.gz archive
+tobari html -o coverage.html -s sources.tar.gz tobari.json
+```
+
+| Flag | Description |
+|------|-------------|
+| `-o <file>` | Output HTML file path (default: `coverage.html`) |
+| `-b <binary>` | Path to a tobari-built binary with embedded sources (requires `--embed-code` build) |
+| `-s <tar.gz>` | Path to a tar.gz archive of extracted sources (from `tobari extract`) |
+
+The `-b` and `-s` flags are mutually exclusive. When `-b` is specified, the command runs the binary with `TOBARI_EXTRACT_SOURCES` to obtain the source archive, then uses it to resolve file paths in the coverage data.
+
 # Example
 
 We will use a more practical example to give you a better idea of how to use tobari. The example code is located in examples/http, so you can run it on your own environment as well.

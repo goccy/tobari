@@ -11,6 +11,7 @@ Usage:
 Commands:
     flags       Output flags for go build/test with coverage
     extract     Extract embedded source code from an instrumented binary
+    html        Generate HTML coverage report from coverprofile or tobari.json
     version     Show version information
     help        Show this help message
 
@@ -20,6 +21,11 @@ Flags:
 
 Flags Command Options:
     --embed-code, -E    Embed original source code into the instrumented binary
+
+HTML Command Options:
+    -o <file>           Output HTML file path (default: coverage.html)
+    -b <binary>         Path to tobari-built binary with embedded sources
+    -s <tar.gz>         Path to tar.gz archive of extracted sources
 
 Toolexec Options (used with -toolexec):
     --embed-code        Embed original source code into the instrumented binary
@@ -39,6 +45,18 @@ Examples:
 
     # Extract embedded sources from an instrumented binary
     tobari extract -o sources.tar.gz ./my-binary
+
+    # Generate HTML coverage report from coverprofile
+    tobari html -o coverage.html profile.cover
+
+    # Generate HTML from tobari.json
+    tobari html -o coverage.html tobari.json
+
+    # Generate HTML with sources from embedded binary
+    tobari html -o coverage.html -b ./my-binary profile.cover
+
+    # Generate HTML with sources from extracted tar.gz
+    tobari html -o coverage.html -s sources.tar.gz profile.cover
 
     # Show version
     tobari version
