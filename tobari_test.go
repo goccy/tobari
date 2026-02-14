@@ -1,8 +1,11 @@
 package tobari_test
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -393,4 +396,123 @@ func TestEmbedCode(t *testing.T) {
 	if diff := cmp.Diff(expected, actual); diff != "" {
 		t.Fatalf("embedded files mismatch (-expected +actual):\n%s", diff)
 	}
+}
+
+func TestExtract(t *testing.T) {
+	ctx := t.Context()
+	tmpDir := t.TempDir()
+	tobariBin := filepath.Join(tmpDir, "tobari-test")
+
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+
+	// Get tobari flags with -E (embed-code)
+	flagsOut, err := exec.CommandContext(ctx, tobariBin, "flags", "-E").CombinedOutput()
+	if err != nil {
+		t.Fatalf("tobari flags -E failed: %s: %v", string(flagsOut), err)
+	}
+	tobariFlags := strings.TrimSpace(string(flagsOut))
+
+	// Build the embedcode test program with -E
+	testBin := filepath.Join(tmpDir, "embedcode-test")
+	buildCmd := exec.CommandContext(ctx, "go", "build", "-o", testBin, "testdata/embedcode/main.go")
+	buildCmd.Env = append(os.Environ(), "GOFLAGS="+tobariFlags)
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build with -E failed: %s: %v", string(out), err)
+	}
+
+	// Extract embedded sources using tobari extract
+	outputFile := filepath.Join(tmpDir, "sources.tar.gz")
+	extractCmd := exec.CommandContext(ctx, tobariBin, "extract", "-o", outputFile, testBin)
+	if out, err := extractCmd.CombinedOutput(); err != nil {
+		t.Fatalf("tobari extract failed: %s: %v", string(out), err)
+	}
+
+	// Verify the output file exists
+	info, err := os.Stat(outputFile)
+	if err != nil {
+		t.Fatalf("output file not created: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("output file is empty")
+	}
+
+	// Extract tar.gz and verify contents match original sources
+	actual := extractAndHashTarGz(t, outputFile)
+
+	goFiles, err := filepath.Glob("testdata/embedcode/*.go")
+	if err != nil {
+		t.Fatalf("failed to glob testdata/embedcode: %v", err)
+	}
+	var expected []string
+	for _, f := range goFiles {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", f, err)
+		}
+		absPath, err := filepath.Abs(f)
+		if err != nil {
+			t.Fatalf("failed to get abs path for %s: %v", f, err)
+		}
+		h := sha256.Sum256(data)
+		expected = append(expected, fmt.Sprintf("%s\t%x", filepath.ToSlash(absPath), h))
+	}
+	sort.Strings(expected)
+
+	if diff := cmp.Diff(expected, actual); diff != "" {
+		t.Fatalf("extracted files mismatch (-expected +actual):\n%s", diff)
+	}
+}
+
+func extractAndHashTarGz(t *testing.T, path string) []string {
+	t.Helper()
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("failed to open %s: %v", path, err)
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatalf("failed to create gzip reader: %v", err)
+	}
+	defer func() {
+		_ = gr.Close()
+	}()
+
+	type entry struct {
+		name string
+		hash string
+	}
+	var entries []entry
+	tr := tar.NewReader(gr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar next: %v", err)
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatalf("tar read: %v", err)
+		}
+		h := sha256.Sum256(data)
+		entries = append(entries, entry{
+			name: hdr.Name,
+			hash: fmt.Sprintf("%x", h),
+		})
+	}
+
+	var result []string
+	for _, e := range entries {
+		result = append(result, fmt.Sprintf("%s\t%s", e.name, e.hash))
+	}
+	sort.Strings(result)
+	return result
 }

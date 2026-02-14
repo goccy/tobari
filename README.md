@@ -159,6 +159,18 @@ if reader == nil {
 // reader provides a tar.gz archive of the original source files
 ```
 
+### Extracting Embedded Sources from a Binary
+
+You can also extract embedded sources directly from a built binary using the `tobari extract` command, without writing any code:
+
+```console
+tobari extract -o sources.tar.gz ./my-binary
+```
+
+This runs the instrumented binary internally, extracts all embedded source files, and writes them as a tar.gz archive to the specified path. The `-o` flag is required.
+
+The extraction hook is injected at compile time into the main package, so it works regardless of `-coverpkg` settings. When the `TOBARI_EXTRACT_SOURCES` environment variable is set (which `tobari extract` does internally), the binary writes the archive and exits immediately without running the application's main function.
+
 # Example
 
 We will use a more practical example to give you a better idea of how to use tobari. The example code is located in examples/http, so you can run it on your own environment as well.
