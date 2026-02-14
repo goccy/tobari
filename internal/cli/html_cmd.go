@@ -1,14 +1,11 @@
 package cli
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -67,9 +64,7 @@ func (c *CLI) runHTMLCmd(ctx context.Context, args []string) error {
 		tarGzPath := *sources
 		if *binary != "" {
 			tarGzPath = filepath.Join(tmpDir, "sources.tar.gz")
-			cmd := exec.CommandContext(ctx, *binary)
-			cmd.Env = append(os.Environ(), "TOBARI_EXTRACT_SOURCES="+tarGzPath)
-			if err := cmd.Run(); err != nil {
+			if err := extractSourcesFromBinary(ctx, *binary, tarGzPath); err != nil {
 				return fmt.Errorf("failed to extract sources from binary %s: %w", *binary, err)
 			}
 		}
@@ -163,56 +158,6 @@ func tobariJSONToCoverprofile(data []byte) (string, error) {
 			key, e.StatementCount, e.Count)
 	}
 	return b.String(), nil
-}
-
-func extractTarGz(tarGzPath, destDir string) error {
-	f, err := os.Open(tarGzPath)
-	if err != nil {
-		return fmt.Errorf("failed to open %s: %w", tarGzPath, err)
-	}
-	defer func() { _ = f.Close() }()
-
-	gr, err := gzip.NewReader(f)
-	if err != nil {
-		return fmt.Errorf("failed to create gzip reader: %w", err)
-	}
-	defer func() { _ = gr.Close() }()
-
-	tr := tar.NewReader(gr)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("failed to read tar entry: %w", err)
-		}
-
-		target := filepath.Join(destDir, filepath.FromSlash(hdr.Name))
-		if !strings.HasPrefix(target, filepath.Clean(destDir)+string(os.PathSeparator)) {
-			return fmt.Errorf("tar entry %q escapes destination directory", hdr.Name)
-		}
-
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return fmt.Errorf("failed to create directory for %s: %w", target, err)
-		}
-
-		if err := func() error {
-			out, err := os.Create(target)
-			if err != nil {
-				return fmt.Errorf("failed to create %s: %w", target, err)
-			}
-			defer func() { _ = out.Close() }()
-
-			if _, err := io.Copy(out, tr); err != nil {
-				return fmt.Errorf("failed to write %s: %w", target, err)
-			}
-			return nil
-		}(); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func replacePathsInCoverprofile(content, sourceDir string) string {
