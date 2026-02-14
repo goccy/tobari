@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 func (c *CLI) runExtractCmd(ctx context.Context, args []string) error {
@@ -15,6 +16,12 @@ func (c *CLI) runExtractCmd(ctx context.Context, args []string) error {
 
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	for _, arg := range fs.Args() {
+		if strings.HasPrefix(arg, "-") {
+			return fmt.Errorf("flags must be specified before the binary path\nUsage: tobari extract -o <output.tar.gz> <binary>")
+		}
 	}
 
 	if *output == "" {

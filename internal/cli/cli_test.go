@@ -113,6 +113,31 @@ func TestCLI_Run(t *testing.T) {
 			wantContain: "Usage:",
 		},
 		{
+			name:    "html missing input file",
+			args:    []string{"tobari", "html"},
+			wantErr: true,
+		},
+		{
+			name:    "html mutually exclusive flags",
+			args:    []string{"tobari", "html", "-b", "bin", "-s", "src.tar.gz", "input"},
+			wantErr: true,
+		},
+		{
+			name:    "html flags after input file",
+			args:    []string{"tobari", "html", "input.json", "-o", "out.html"},
+			wantErr: true,
+		},
+		{
+			name:    "extract flags after binary path",
+			args:    []string{"tobari", "extract", "./binary", "-o", "out.tar.gz"},
+			wantErr: true,
+		},
+		{
+			name:    "flags flag after extra arg",
+			args:    []string{"tobari", "flags", "something", "-E"},
+			wantErr: true,
+		},
+		{
 			name:    "unknown command",
 			args:    []string{"tobari", "unknown"},
 			wantErr: true,
