@@ -191,5 +191,3 @@ func filterCoveragecfg(args []string) ([]string, error) {
 	}
 	return ret, nil
 }
-
-

@@ -64,7 +64,7 @@ func overwriteImportcfg(importCfgPath string, pkgs map[string]string) error {
 	}
 
 	content = newEntries.String() + content
-	if err := os.WriteFile(importCfgPath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(importCfgPath, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("failed to write updated importcfg: %w", err)
 	}
 	return nil
