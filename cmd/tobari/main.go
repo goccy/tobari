@@ -12,7 +12,7 @@ func main() {
 	ctx := context.Background()
 	c := cli.New()
 	if err := c.Run(ctx, os.Args); err != nil {
-		fmt.Fprint(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
