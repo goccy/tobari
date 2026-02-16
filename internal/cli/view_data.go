@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -332,7 +331,3 @@ func buildFileIndex(entriesMap map[string][]tobariJSONEntry) ([]string, map[stri
 	return paths, indexMap
 }
 
-// formatPercent formats a float64 ratio as a percentage string.
-func formatPercent(ratio float64) string {
-	return fmt.Sprintf("%.1f%%", ratio*100)
-}
