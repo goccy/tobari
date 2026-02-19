@@ -22,7 +22,7 @@ Only `tobari.json` format is accepted. Passing a coverprofile results in an erro
 
 ## Generated HTML Features
 
-The generated HTML is a fully self-contained single file with no external dependencies. It consists of three tabs.
+The generated HTML is a fully self-contained single file with no external dependencies. It automatically adapts to dark mode based on the OS/browser setting (`prefers-color-scheme: dark`). It consists of three tabs.
 
 ### Coverage Tab
 
