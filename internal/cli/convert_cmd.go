@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -12,7 +13,7 @@ import (
 	"github.com/goccy/tobari"
 )
 
-func (c *CLI) runConvertCmd(_ context.Context, args []string) error {
+func (c *CLI) runConvertCmd(_ context.Context, args []string) (e error) {
 	fs := flag.NewFlagSet("convert", flag.ContinueOnError)
 	fs.SetOutput(c.stderr)
 	output := fs.String("o", "cover.out", "output coverprofile file path")
@@ -50,13 +51,10 @@ func (c *CLI) runConvertCmd(_ context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create output file %s: %w", *output, err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { e = errors.Join(e, f.Close()) }()
 
 	if err := report.WriteCoverprofile(f); err != nil {
 		return fmt.Errorf("failed to write coverprofile: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("failed to write output file %s: %w", *output, err)
 	}
 	if _, err := fmt.Fprintf(c.stdout, "Coverprofile written to %s\n", *output); err != nil {
 		return err
