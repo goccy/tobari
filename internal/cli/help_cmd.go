@@ -11,8 +11,8 @@ Usage:
 Commands:
     flags       Output flags for go build/test with coverage
     extract     Extract embedded source code from an instrumented binary
-    html        Generate HTML coverage report from coverprofile or tobari.json
-    view        Generate interactive HTML coverage visualization from tobari.json
+    html        Generate HTML coverage report
+    convert     Convert tobari.json to coverprofile format
     version     Show version information
     help        Show this help message
 
@@ -24,14 +24,17 @@ Flags Command Options:
     --embed-code, -E    Embed original source code into the instrumented binary
 
 HTML Command Options:
-    -o <file>           Output HTML file path (default: coverage.html)
+    -o <file>           Output HTML file path (default: cover.html)
     -b <binary>         Path to tobari-built binary with embedded sources
     -s <tar.gz>         Path to tar.gz archive of extracted sources
 
-View Command Options:
-    -o <file>           Output HTML file path (default: coverage-view.html)
-    -b <binary>         Path to tobari-built binary with embedded sources
-    -s <tar.gz>         Path to tar.gz archive of extracted sources
+    When given a tobari.json file, generates an interactive HTML report with
+    per-test coverage visualization, overlap analysis, and summary statistics.
+    When given a coverprofile file, generates a standard HTML report using
+    go tool cover.
+
+Convert Command Options:
+    -o <file>           Output coverprofile file path (default: cover.out)
 
 Toolexec Options (used with -toolexec):
     --embed-code        Embed original source code into the instrumented binary
@@ -52,20 +55,17 @@ Examples:
     # Extract embedded sources from an instrumented binary
     tobari extract -o sources.tar.gz ./my-binary
 
-    # Generate HTML coverage report from coverprofile
-    tobari html -o coverage.html profile.cover
+    # Generate interactive HTML from tobari.json
+    tobari html -o cover.html tobari.json
 
-    # Generate HTML from tobari.json
-    tobari html -o coverage.html tobari.json
+    # Generate HTML with embedded sources
+    tobari html -o cover.html -b ./my-binary tobari.json
 
-    # Generate HTML with sources from embedded binary
-    tobari html -o coverage.html -b ./my-binary profile.cover
+    # Generate standard HTML from coverprofile
+    tobari html -o cover.html profile.cover
 
-    # Generate HTML with sources from extracted tar.gz
-    tobari html -o coverage.html -s sources.tar.gz profile.cover
-
-    # Generate interactive coverage visualization
-    tobari view -o report.html tobari.json
+    # Convert tobari.json to coverprofile
+    tobari convert -o profile.cover tobari.json
 
     # Show version
     tobari version

@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/goccy/tobari"
 )
 
 // createTestGoFile creates a simple Go source file and returns its absolute path.
@@ -44,37 +46,25 @@ func createCoverprofile(t *testing.T, dir, srcPath string) string {
 	return profile
 }
 
-// createTobariJSON creates a tobari.json file referencing the given source file.
+// createTobariJSON creates a tobari.json file in the new compact format
+// referencing the given source file.
 func createTobariJSON(t *testing.T, dir, srcPath string) string {
 	t.Helper()
-	entriesMap := map[string][]tobariJSONEntry{
-		"TestAdd": {
-			{
-				FileName:       srcPath,
-				Start:          tobariEntryPos{Line: 3, Column: 24},
-				End:            tobariEntryPos{Line: 5, Column: 2},
-				StatementCount: 1,
-				Count:          3,
+	report := tobari.CoverReport{
+		Metadata: tobari.CoverReportMetadata{
+			Files: []string{srcPath},
+			Entry: []string{"file", "startLine", "startCol", "endLine", "endCol", "stmts"},
+			All: [][]int{
+				{0, 3, 24, 5, 2, 1}, // block 0: add function
+				{0, 7, 13, 9, 2, 1}, // block 1: main function
 			},
 		},
-		"TestMain": {
-			{
-				FileName:       srcPath,
-				Start:          tobariEntryPos{Line: 3, Column: 24},
-				End:            tobariEntryPos{Line: 5, Column: 2},
-				StatementCount: 1,
-				Count:          2,
-			},
-			{
-				FileName:       srcPath,
-				Start:          tobariEntryPos{Line: 7, Column: 13},
-				End:            tobariEntryPos{Line: 9, Column: 2},
-				StatementCount: 1,
-				Count:          1,
-			},
+		Counts: []*tobari.CoverReportCount{
+			{Name: "TestAdd", Coverprofile: [][]int{{0, 3}}},
+			{Name: "TestMain", Coverprofile: [][]int{{0, 2}, {1, 1}}},
 		},
 	}
-	data, err := json.Marshal(entriesMap)
+	data, err := json.Marshal(report)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,6 +113,66 @@ func createSourceTarGz(t *testing.T, dir, srcPath string) string {
 	return tarGzPath
 }
 
+func TestParseTobariJSON_CompactFormat(t *testing.T) {
+	data := []byte(`{
+		"metadata": {
+			"files": ["/path/to/main.go"],
+			"entry": ["file", "startLine", "startCol", "endLine", "endCol", "stmts"],
+			"all": [[0, 3, 24, 5, 2, 1], [0, 7, 13, 9, 2, 1]]
+		},
+		"counts": [
+			{"name": "TestA", "coverprofile": [[0, 3]]},
+			{"name": "TestB", "coverprofile": [[0, 2], [1, 1]]}
+		]
+	}`)
+	entriesMap, err := parseTobariJSON(data)
+	if err != nil {
+		t.Fatalf("parseTobariJSON() error = %v", err)
+	}
+	if len(entriesMap) != 2 {
+		t.Fatalf("expected 2 tests, got %d", len(entriesMap))
+	}
+	testA := entriesMap["TestA"]
+	if len(testA) != 1 {
+		t.Fatalf("TestA: expected 1 entry, got %d", len(testA))
+	}
+	if testA[0].FileName != "/path/to/main.go" || testA[0].Count != 3 {
+		t.Errorf("TestA[0]: FileName=%q, Count=%d", testA[0].FileName, testA[0].Count)
+	}
+	if testA[0].Start.Line != 3 || testA[0].Start.Column != 24 {
+		t.Errorf("TestA[0] Start: Line=%d, Col=%d", testA[0].Start.Line, testA[0].Start.Column)
+	}
+	testB := entriesMap["TestB"]
+	if len(testB) != 2 {
+		t.Fatalf("TestB: expected 2 entries, got %d", len(testB))
+	}
+}
+
+func TestParseTobariJSON_LegacyFormat(t *testing.T) {
+	data := []byte(`{
+		"TestA": [
+			{"FileName": "/path/to/main.go", "Start": {"Line": 3, "Column": 24}, "End": {"Line": 5, "Column": 2}, "StatementCount": 1, "Count": 3}
+		],
+		"TestB": [
+			{"FileName": "/path/to/main.go", "Start": {"Line": 7, "Column": 13}, "End": {"Line": 9, "Column": 2}, "StatementCount": 1, "Count": 1}
+		]
+	}`)
+	entriesMap, err := parseTobariJSON(data)
+	if err != nil {
+		t.Fatalf("parseTobariJSON() error = %v", err)
+	}
+	if len(entriesMap) != 2 {
+		t.Fatalf("expected 2 tests, got %d", len(entriesMap))
+	}
+	testA := entriesMap["TestA"]
+	if len(testA) != 1 {
+		t.Fatalf("TestA: expected 1 entry, got %d", len(testA))
+	}
+	if testA[0].FileName != "/path/to/main.go" || testA[0].Count != 3 {
+		t.Errorf("TestA[0]: FileName=%q, Count=%d", testA[0].FileName, testA[0].Count)
+	}
+}
+
 func TestRunHTMLCmd_Coverprofile(t *testing.T) {
 	srcDir := t.TempDir()
 	srcPath := createTestGoFile(t, srcDir)
@@ -165,40 +215,92 @@ func TestRunHTMLCmd_TobariJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read output HTML: %v", err)
 	}
-	if !strings.Contains(string(data), "<!DOCTYPE html>") {
-		t.Errorf("output HTML does not contain <!DOCTYPE html>")
+	html := string(data)
+
+	if !strings.Contains(html, "<!DOCTYPE html>") {
+		t.Error("output HTML does not contain <!DOCTYPE html>")
+	}
+	if !strings.Contains(html, "Tobari Coverage Report") {
+		t.Error("output HTML does not contain title")
+	}
+	if !strings.Contains(html, "TestAdd") {
+		t.Error("output HTML does not contain test name TestAdd")
+	}
+	if !strings.Contains(html, "TestMain") {
+		t.Error("output HTML does not contain test name TestMain")
+	}
+	if !strings.Contains(stdout.String(), "HTML coverage report written to") {
+		t.Errorf("stdout = %q, want to contain success message", stdout.String())
 	}
 }
 
 func TestRunHTMLCmd_TobariJSON_MergesCounts(t *testing.T) {
 	srcDir := t.TempDir()
 	srcPath := createTestGoFile(t, srcDir)
-	jsonPath := createTobariJSON(t, srcDir, srcPath)
 
-	data, err := os.ReadFile(jsonPath)
+	// Create tobari.json with 3 blocks: block 2 is uncovered by any test.
+	report := tobari.CoverReport{
+		Metadata: tobari.CoverReportMetadata{
+			Files: []string{srcPath},
+			Entry: []string{"file", "startLine", "startCol", "endLine", "endCol", "stmts"},
+			All: [][]int{
+				{0, 3, 24, 5, 2, 1},   // block 0: add function
+				{0, 7, 13, 9, 2, 1},   // block 1: main function
+				{0, 11, 1, 13, 2, 1},  // block 2: uncovered function (no test covers it)
+			},
+		},
+		Counts: []*tobari.CoverReportCount{
+			{Name: "TestAdd", Coverprofile: [][]int{{0, 3}}},
+			{Name: "TestMain", Coverprofile: [][]int{{0, 2}, {1, 1}}},
+		},
+	}
+	data, err := json.Marshal(report)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	profile, err := tobariJSONToCoverprofile(data)
 	if err != nil {
 		t.Fatalf("tobariJSONToCoverprofile() error = %v", err)
 	}
 
-	// TestAdd has Count=3, TestMain has Count=2 for the same block (3.24,5.2).
-	// They should be summed to 5.
 	lines := strings.Split(strings.TrimSpace(profile), "\n")
-	found := false
+
+	// TestAdd has Count=3, TestMain has Count=2 for block 0 (3.24,5.2).
+	// They should be summed to 5.
+	foundMerged := false
 	for _, line := range lines {
 		if strings.Contains(line, "3.24,5.2") {
 			if !strings.HasSuffix(line, " 1 5") {
 				t.Errorf("expected merged count 5, got line: %s", line)
 			}
-			found = true
+			foundMerged = true
 			break
 		}
 	}
-	if !found {
+	if !foundMerged {
 		t.Errorf("block 3.24,5.2 not found in merged coverprofile:\n%s", profile)
+	}
+
+	// Block 2 (11.1,13.2) is in metadata.all but no test covers it.
+	// It should still appear with count=0.
+	foundUncovered := false
+	for _, line := range lines {
+		if strings.Contains(line, "11.1,13.2") {
+			if !strings.HasSuffix(line, " 1 0") {
+				t.Errorf("expected uncovered block with count 0, got line: %s", line)
+			}
+			foundUncovered = true
+			break
+		}
+	}
+	if !foundUncovered {
+		t.Errorf("uncovered block 11.1,13.2 not found in coverprofile:\n%s", profile)
+	}
+
+	// Total: mode line + 3 blocks = 4 lines.
+	if len(lines) != 4 {
+		t.Errorf("expected 4 lines (mode + 3 blocks), got %d:\n%s", len(lines), profile)
 	}
 }
 
@@ -243,8 +345,8 @@ func TestRunHTMLCmd_TobariJSONWithSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read output HTML: %v", err)
 	}
-	if !strings.Contains(string(data), "<!DOCTYPE html>") {
-		t.Errorf("output HTML does not contain <!DOCTYPE html>")
+	if !strings.Contains(string(data), "func add") {
+		t.Error("output HTML does not contain source code content")
 	}
 }
 
@@ -271,12 +373,12 @@ func TestRunHTMLCmd_DefaultOutput(t *testing.T) {
 		t.Fatalf("runHTMLCmd() error = %v\nstderr: %s", err, stderr.String())
 	}
 
-	defaultOutput := filepath.Join(outDir, "coverage.html")
+	defaultOutput := filepath.Join(outDir, "cover.html")
 	if _, err := os.Stat(defaultOutput); err != nil {
 		t.Errorf("default output file not created: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "coverage.html") {
-		t.Errorf("stdout = %q, want to contain 'coverage.html'", stdout.String())
+	if !strings.Contains(stdout.String(), "cover.html") {
+		t.Errorf("stdout = %q, want to contain 'cover.html'", stdout.String())
 	}
 }
 

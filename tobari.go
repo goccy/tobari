@@ -8,6 +8,7 @@ import (
 	"io"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/goccy/tobari/internal/tobari"
@@ -53,7 +54,7 @@ func Cover(fn func()) {
 }
 
 // CoverWithName when measuring coverage, you can assign a name to the measurement scope.
-// By using the WriteCoverProfileByName method when writing out the results,
+// By using the WriteCoverprofileByName method when writing out the results,
 // you can filter and output only the coverage data associated with the named measurement target.
 func CoverWithName(name string, fn func()) {
 	cover(name, fn)
@@ -81,28 +82,28 @@ func cover(name string, fn func()) {
 	}
 }
 
-// WriteAllCoverProfile uses the coverage counts at the time this method is called to write coverage data for all locations subject to coverage measurement to the provided io.Writer value.
+// WriteAllCoverprofile uses the coverage counts at the time this method is called to write coverage data for all locations subject to coverage measurement to the provided io.Writer value.
 // Since the data is written in the coverprofile format, you can directly use with `go tool cover`.
 // The resulting data is the same as the data obtained by decoding the output from executing WriteMeta and WriteCounters using runtime/coverage.
-func WriteAllCoverProfile(mode Mode, w io.Writer) {
-	tobari.WriteAllCoverProfile(string(mode), w)
+func WriteAllCoverprofile(mode Mode, w io.Writer) {
+	tobari.WriteAllCoverprofile(string(mode), w)
 }
 
-// WriteCoverProfile writes coverprofile data based on the coverage range measured by Cover or CoverWithName.
+// WriteCoverprofile writes coverprofile data based on the coverage range measured by Cover or CoverWithName.
 // Parts that are not invoked via the Cover or CoverWithName methods are not counted.
 // Also, unreachable ranges are calculated based on the paths that were actually called.
-func WriteCoverProfile(mode Mode, w io.Writer) {
-	tobari.WriteCoverProfile(string(mode), w)
+func WriteCoverprofile(mode Mode, w io.Writer) {
+	tobari.WriteCoverprofile(string(mode), w)
 }
 
-// WriteCoverProfileByName it basically works the same as WriteCoverProfile,
+// WriteCoverprofileByName it basically works the same as WriteCoverprofile,
 // but additionally allows you to target only the ranges with the specified name.
-func WriteCoverProfileByName(name string, mode Mode, w io.Writer) {
-	tobari.WriteCoverProfileByName(name, string(mode), w)
+func WriteCoverprofileByName(name string, mode Mode, w io.Writer) {
+	tobari.WriteCoverprofileByName(name, string(mode), w)
 }
 
-// CoverProfile represents coverage data in coverprofile format.
-type CoverProfile struct {
+// Coverprofile represents coverage data in coverprofile format.
+type Coverprofile struct {
 	// Mode indicates the coverage mode used.
 	Mode Mode
 	// Entries contains the list of coverage entries.
@@ -131,21 +132,21 @@ type EntryPos struct {
 	Column int
 }
 
-// CoverProfileByName retrieve coverage data for the specified name.
-func CoverProfileByName(name string, mode Mode) *CoverProfile {
-	return &CoverProfile{
+// CoverprofileByName retrieve coverage data for the specified name.
+func CoverprofileByName(name string, mode Mode) *Coverprofile {
+	return &Coverprofile{
 		Mode:    mode,
 		Entries: toEntries(tobari.CoverEntriesByName(name)),
 	}
 }
 
-// CoverProfileMap if coverage was measured using CoverWithName,
+// CoverprofileMap if coverage was measured using CoverWithName,
 // it outputs the correspondence between the names and the coverprofile data for each name.
-func CoverProfileMap(mode Mode) map[string]*CoverProfile {
+func CoverprofileMap(mode Mode) map[string]*Coverprofile {
 	entriesMap := tobari.CoverEntriesMap()
-	coverprofMap := make(map[string]*CoverProfile, len(entriesMap))
+	coverprofMap := make(map[string]*Coverprofile, len(entriesMap))
 	for name, entries := range entriesMap {
-		coverprofMap[name] = &CoverProfile{
+		coverprofMap[name] = &Coverprofile{
 			Mode:    mode,
 			Entries: toEntries(entries),
 		}
@@ -175,6 +176,122 @@ func toEntry(e *tobari.CoverEntry) *Entry {
 		StatementCount: e.NumStmts,
 		Count:          e.Count,
 	}
+}
+
+// CoverReport holds per-test coverage data in a compact format.
+// The struct mirrors the tobari.json schema directly, so json.Marshal
+// produces the compact format without custom marshaling.
+type CoverReport struct {
+	Metadata CoverReportMetadata `json:"metadata"`
+	Counts   []*CoverReportCount `json:"counts"`
+}
+
+// CoverReportMetadata contains file names, entry column definitions,
+// and all instrumented block definitions.
+type CoverReportMetadata struct {
+	Files []string `json:"files"`
+	Entry []string `json:"entry"`
+	All   [][]int  `json:"all"`
+}
+
+// CoverReportCount holds a test name and its coverage entries.
+type CoverReportCount struct {
+	Name         string  `json:"name"`
+	Coverprofile [][]int `json:"coverprofile"`
+}
+
+// CollectCoverReport collects the current coverage data measured by
+// CoverWithName and returns it as a CoverReport.
+func CollectCoverReport() *CoverReport {
+	data := tobari.CollectCoverReportData()
+	counts := make([]*CoverReportCount, len(data.Counts))
+	for i, c := range data.Counts {
+		counts[i] = &CoverReportCount{
+			Name:         c.Name,
+			Coverprofile: c.Coverprofile,
+		}
+	}
+	return &CoverReport{
+		Metadata: CoverReportMetadata{
+			Files: data.Files,
+			Entry: data.Entry,
+			All:   data.All,
+		},
+		Counts: counts,
+	}
+}
+
+// WriteCoverprofile writes the merged coverage data in coverprofile format.
+// All blocks from Metadata.All are included; blocks not covered by any test
+// appear with count=0. Counts from all tests are summed per block.
+func (r *CoverReport) WriteCoverprofile(w io.Writer) error {
+	type blockEntry struct {
+		key            string
+		statementCount int
+		count          int
+	}
+
+	// Initialize all blocks from metadata.all with count=0.
+	blocks := make([]*blockEntry, 0, len(r.Metadata.All))
+	blockByIdx := make(map[int]*blockEntry, len(r.Metadata.All))
+	for i, block := range r.Metadata.All {
+		if len(block) != 6 {
+			continue
+		}
+		fileIdx := block[0]
+		if fileIdx < 0 || fileIdx >= len(r.Metadata.Files) {
+			continue
+		}
+		key := fmt.Sprintf("%s:%d.%d,%d.%d",
+			r.Metadata.Files[fileIdx],
+			block[1], block[2], block[3], block[4])
+		entry := &blockEntry{key: key, statementCount: block[5]}
+		blocks = append(blocks, entry)
+		blockByIdx[i] = entry
+	}
+
+	// Overlay counts from each test.
+	for _, c := range r.Counts {
+		for _, cp := range c.Coverprofile {
+			if len(cp) != 2 {
+				continue
+			}
+			if entry, ok := blockByIdx[cp[0]]; ok {
+				entry.count += cp[1]
+			}
+		}
+	}
+
+	sort.Slice(blocks, func(i, j int) bool {
+		return blocks[i].key < blocks[j].key
+	})
+
+	if _, err := io.WriteString(w, "mode: set\n"); err != nil {
+		return err
+	}
+	for _, entry := range blocks {
+		if _, err := fmt.Fprintf(w, "%s %d %d\n", entry.key, entry.statementCount, entry.count); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MarshalTOON produces human-readable TOON format from the CoverReport.
+func (r *CoverReport) MarshalTOON() ([]byte, error) {
+	counts := make([]tobari.CoverReportCountData, len(r.Counts))
+	for i, c := range r.Counts {
+		counts[i] = tobari.CoverReportCountData{
+			Name:         c.Name,
+			Coverprofile: c.Coverprofile,
+		}
+	}
+	return tobari.MarshalReportDataTOON(&tobari.CoverReportData{
+		Files:  r.Metadata.Files,
+		Entry:  r.Metadata.Entry,
+		All:    r.Metadata.All,
+		Counts: counts,
+	})
 }
 
 // ReadCoverArchivedFile extracts the original source files embedded during

@@ -85,7 +85,7 @@ func run(ctx context.Context) error {
 	}
 	defer f.Close()
 
-	tobari.WriteAllCoverProfile(tobari.SetMode, f)
+	tobari.WriteAllCoverprofile(tobari.SetMode, f)
 	return nil
 }
 

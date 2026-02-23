@@ -6,38 +6,38 @@ import (
 	"strings"
 )
 
-// viewData is the top-level structure serialized as JSON into the HTML.
-type viewData struct {
-	Tests      []*viewTest    `json:"tests"`
-	TestTree   []*testNode    `json:"testTree"`
-	Files      []*viewFile    `json:"files"`
-	Overlaps   []*overlapPair `json:"overlaps"`
+// tobarifmtData is the top-level structure serialized as JSON into the HTML.
+type tobarifmtData struct {
+	Tests      []*tobarifmtTest    `json:"tests"`
+	TestTree   []*tobarifmtTestNode    `json:"testTree"`
+	Files      []*tobarifmtFile    `json:"files"`
+	Overlaps   []*tobarifmtOverlapPair `json:"overlaps"`
 	InstrLines map[int][]int  `json:"instrLines"` // fileIndex → all instrumented line numbers (Count >= 0)
 }
 
-// viewTest represents a test with line-level coverage (compact representation).
-type viewTest struct {
+// tobarifmtTest represents a test with line-level coverage (compact representation).
+type tobarifmtTest struct {
 	Name     string        `json:"n"`
 	Coverage map[int][]int `json:"c"` // fileIndex → sorted list of covered line numbers
 }
 
-// viewFile represents a source file with its content.
-type viewFile struct {
+// tobarifmtFile represents a source file with its content.
+type tobarifmtFile struct {
 	Path  string   `json:"path"`
 	Short string   `json:"short"`
 	Lines []string `json:"lines"`
 }
 
-// testNode represents a node in the test name tree.
-type testNode struct {
+// tobarifmtTestNode represents a node in the test name tree.
+type tobarifmtTestNode struct {
 	Name     string      `json:"name"`
 	FullName string      `json:"fullName"`
 	IsLeaf   bool        `json:"isLeaf"`
-	Children []*testNode `json:"children,omitempty"`
+	Children []*tobarifmtTestNode `json:"children,omitempty"`
 }
 
-// overlapPair stores the overlap metric between two tests.
-type overlapPair struct {
+// tobarifmtOverlapPair stores the overlap metric between two tests.
+type tobarifmtOverlapPair struct {
 	TestA     string  `json:"testA"`
 	TestB     string  `json:"testB"`
 	MatchRate float64 `json:"matchRate"`
@@ -46,10 +46,10 @@ type overlapPair struct {
 }
 
 // buildTestTree constructs a hierarchical tree from test names split by "/".
-func buildTestTree(testNames []string) []*testNode {
+func buildTestTree(testNames []string) []*tobarifmtTestNode {
 	sort.Strings(testNames)
 
-	root := &testNode{Children: make([]*testNode, 0)}
+	root := &tobarifmtTestNode{Children: make([]*tobarifmtTestNode, 0)}
 
 	for _, name := range testNames {
 		parts := strings.Split(name, "/")
@@ -58,10 +58,10 @@ func buildTestTree(testNames []string) []*testNode {
 			fullName := strings.Join(parts[:i+1], "/")
 			child := findChild(current, part)
 			if child == nil {
-				child = &testNode{
+				child = &tobarifmtTestNode{
 					Name:     part,
 					FullName: fullName,
-					Children: make([]*testNode, 0),
+					Children: make([]*tobarifmtTestNode, 0),
 				}
 				current.Children = append(current.Children, child)
 			}
@@ -75,7 +75,7 @@ func buildTestTree(testNames []string) []*testNode {
 	return root.Children
 }
 
-func findChild(parent *testNode, name string) *testNode {
+func findChild(parent *tobarifmtTestNode, name string) *tobarifmtTestNode {
 	for _, c := range parent.Children {
 		if c.Name == name {
 			return c
@@ -120,7 +120,7 @@ func convertToLineCoverage(entries []tobariJSONEntry, fileIndexMap map[string]in
 // computeOverlaps computes Jaccard similarity between top-level tests.
 // Top-level tests are determined by the first segment before "/".
 // Child test coverages are merged into their top-level parent.
-func computeOverlaps(entriesMap map[string][]tobariJSONEntry, fileIndexMap map[string]int) []*overlapPair {
+func computeOverlaps(entriesMap map[string][]tobariJSONEntry, fileIndexMap map[string]int) []*tobarifmtOverlapPair {
 	// Group entries by top-level test name
 	type sigKey struct {
 		fi        int
@@ -167,7 +167,7 @@ func computeOverlaps(entriesMap map[string][]tobariJSONEntry, fileIndexMap map[s
 	sort.Strings(topLevelNames)
 
 	// Compute pairwise Jaccard similarity
-	var pairs []*overlapPair
+	var pairs []*tobarifmtOverlapPair
 	for i := 0; i < len(topLevelNames); i++ {
 		sigsA := topLevelSigs[topLevelNames[i]]
 		for j := i + 1; j < len(topLevelNames); j++ {
@@ -184,7 +184,7 @@ func computeOverlaps(entriesMap map[string][]tobariJSONEntry, fileIndexMap map[s
 				continue
 			}
 			rate := float64(common) / float64(total)
-			pairs = append(pairs, &overlapPair{
+			pairs = append(pairs, &tobarifmtOverlapPair{
 				TestA:     topLevelNames[i],
 				TestB:     topLevelNames[j],
 				MatchRate: rate,
@@ -254,8 +254,8 @@ func collectAllCoverageLines(entriesMap map[string][]tobariJSONEntry, fileIndexM
 	return allLines
 }
 
-// buildViewData constructs the viewData from parsed tobari.json entries and source files.
-func buildViewData(entriesMap map[string][]tobariJSONEntry, files []*viewFile, fileIndexMap map[string]int) *viewData {
+// buildTobarifmtData constructs the tobarifmtData from parsed tobari.json entries and source files.
+func buildTobarifmtData(entriesMap map[string][]tobariJSONEntry, files []*tobarifmtFile, fileIndexMap map[string]int) *tobarifmtData {
 	// Build tests with line-level coverage
 	var testNames []string
 	for name := range entriesMap {
@@ -263,18 +263,18 @@ func buildViewData(entriesMap map[string][]tobariJSONEntry, files []*viewFile, f
 	}
 	sort.Strings(testNames)
 
-	tests := make([]*viewTest, 0, len(testNames))
+	tests := make([]*tobarifmtTest, 0, len(testNames))
 	for _, name := range testNames {
 		entries := entriesMap[name]
 		cov := convertToLineCoverage(entries, fileIndexMap)
 		// Only include non-empty coverage
 		if len(cov) > 0 {
-			tests = append(tests, &viewTest{
+			tests = append(tests, &tobarifmtTest{
 				Name:     name,
 				Coverage: cov,
 			})
 		} else {
-			tests = append(tests, &viewTest{
+			tests = append(tests, &tobarifmtTest{
 				Name:     name,
 				Coverage: nil,
 			})
@@ -299,7 +299,7 @@ func buildViewData(entriesMap map[string][]tobariJSONEntry, files []*viewFile, f
 		instrLines[fi] = sorted
 	}
 
-	return &viewData{
+	return &tobarifmtData{
 		Tests:      tests,
 		TestTree:   tree,
 		Files:      files,

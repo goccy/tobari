@@ -91,6 +91,6 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	tobari.WriteCoverProfile(tobari.SetMode, f)
+	tobari.WriteCoverprofile(tobari.SetMode, f)
 	return nil
 }

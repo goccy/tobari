@@ -118,10 +118,10 @@ tobariInterceptor := func(ctx context.Context, req any, info *grpc.UnaryServerIn
 grpcServer := grpc.NewServer(grpc.UnaryInterceptor(tobariInterceptor))
 ```
 
-When outputting coverage data, you can use `WriteCoverProfileByName` or `CoverProfileMap`:
+When outputting coverage data, you can use `WriteCoverprofileByName` or `CoverprofileMap`:
 
-- `WriteCoverProfileByName`: Get coverprofile results for a specified name
-- `CoverProfileMap`: Return the relationship between names and coverprofiles in map format
+- `WriteCoverprofileByName`: Get coverprofile results for a specified name
+- `CoverprofileMap`: Return the relationship between names and coverprofiles in map format
 
 These APIs can be executed by creating a separate gRPC server and calling specific endpoints when E2E tests finish.
 
@@ -271,7 +271,7 @@ func run(ctx context.Context) error {
 	mux.HandleFunc("/coverend", func(w http.ResponseWriter, req *http.Request) {
 		// Writes data in coverprofile format.
 		// The resulting output can be directly used with `go tool cover`.
-		tobari.WriteCoverProfile(tobari.SetMode, w)
+		tobari.WriteCoverprofile(tobari.SetMode, w)
 	})
 
 	mux.HandleFunc("/foo", func(w http.ResponseWriter, req *http.Request) {

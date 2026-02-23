@@ -48,7 +48,7 @@ func run(ctx context.Context) error {
 	mux.HandleFunc("/coverend", func(w http.ResponseWriter, req *http.Request) {
 		// Writes data in coverprofile format.
 		// The resulting output can be directly used with `go tool cover`.
-		tobari.WriteCoverProfile(tobari.SetMode, w)
+		tobari.WriteCoverprofile(tobari.SetMode, w)
 	})
 
 	mux.HandleFunc("/foo", func(w http.ResponseWriter, req *http.Request) {

@@ -104,8 +104,8 @@ func (c *CLI) handleSubcommand(ctx context.Context, tobariBinPath, cmd string, a
 		return c.runExtractCmd(ctx, args)
 	case "html":
 		return c.runHTMLCmd(ctx, args)
-	case "view":
-		return c.runViewCmd(ctx, args)
+	case "convert":
+		return c.runConvertCmd(ctx, args)
 	case "version":
 		return c.showVersion()
 	case "help":
