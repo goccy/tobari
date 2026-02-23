@@ -1,28 +1,29 @@
-# tobari view
+# tobari html
 
-`tobari view` generates an interactive single-file HTML report from `tobari.json` (per-test coverage data).
+`tobari html` generates an HTML coverage report. The output format depends on the input:
+
+- **tobari.json**: Generates an interactive single-file HTML report with per-test coverage visualization, overlap analysis, and summary statistics.
+- **coverprofile**: Generates a standard HTML report using `go tool cover`.
 
 ## Usage
 
 ```bash
-tobari view [-o output.html] [-b binary | -s sources.tar.gz] <tobari.json>
+tobari html [-o cover.html] [-b binary | -s sources.tar.gz] <tobari.json-or-coverprofile>
 ```
 
 ### Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-o` | `coverage-view.html` | Output HTML file path |
+| `-o` | `cover.html` | Output HTML file path |
 | `-b` | - | Path to tobari-built binary with embedded sources |
 | `-s` | - | Path to tar.gz archive of extracted sources |
 
-`-b` and `-s` are mutually exclusive. If neither is specified, source files are read directly from the local filesystem using the paths in `tobari.json`.
+`-b` and `-s` are mutually exclusive. If neither is specified, source files are read directly from the local filesystem using the paths in the input file.
 
-Only `tobari.json` format is accepted. Passing a coverprofile results in an error (use `tobari html` for coverprofile files).
+## Interactive HTML Report (tobari.json input)
 
-## Generated HTML Features
-
-The generated HTML is a fully self-contained single file with no external dependencies. It automatically adapts to dark mode based on the OS/browser setting (`prefers-color-scheme: dark`). It consists of three tabs.
+When given a `tobari.json` file, the generated HTML is a fully self-contained single file with no external dependencies. It automatically adapts to dark mode based on the OS/browser setting (`prefers-color-scheme: dark`). It consists of three tabs.
 
 ### Coverage Tab
 
@@ -117,3 +118,7 @@ A view displaying overall statistics.
 - Covered lines, total instrumented lines, and coverage percentage per top-level test
 - Sorted by coverage percentage descending
 - Includes a coverage bar
+
+## Standard HTML Report (coverprofile input)
+
+When given a coverprofile file (starting with `mode:`), generates a standard HTML coverage report using `go tool cover -html`. This is the same output as running `go tool cover -html=profile.cover` directly.

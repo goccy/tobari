@@ -50,7 +50,7 @@ func run(ctx context.Context) error {
 		// Writes data in coverprofile format.
 		// The resulting output can be directly used with `go tool cover`.
 		name := req.Header.Get("X-GO-COVERAGE")
-		tobari.WriteCoverProfileByName(name, tobari.CountMode, w)
+		tobari.WriteCoverprofileByName(name, tobari.CountMode, w)
 	})
 
 	mux.HandleFunc("/foo", func(w http.ResponseWriter, req *http.Request) {

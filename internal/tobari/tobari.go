@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -50,7 +51,7 @@ func CoverEntriesByName(name string) []*CoverEntry {
 	return nil
 }
 
-func CoverProfileMap(mode string) map[string]string {
+func CoverprofileMap(mode string) map[string]string {
 	entriesMap := CoverEntriesMap()
 	ret := make(map[string]string, len(entriesMap))
 	for k, entries := range entriesMap {
@@ -74,7 +75,7 @@ func CoverEntriesMap() map[string][]*CoverEntry {
 	return ret
 }
 
-func WriteCoverProfile(mode string, w io.Writer) {
+func WriteCoverprofile(mode string, w io.Writer) {
 	entryMapMu.RLock()
 	defer entryMapMu.RUnlock()
 
@@ -87,7 +88,7 @@ func WriteCoverProfile(mode string, w io.Writer) {
 	_, _ = fmt.Fprint(w, renderMap(mode, mergeMap))
 }
 
-func WriteCoverProfileByName(name, mode string, w io.Writer) {
+func WriteCoverprofileByName(name, mode string, w io.Writer) {
 	entryMapMu.RLock()
 	defer entryMapMu.RUnlock()
 
@@ -100,7 +101,7 @@ func WriteCoverProfileByName(name, mode string, w io.Writer) {
 	}
 }
 
-func WriteAllCoverProfile(mode string, w io.Writer) {
+func WriteAllCoverprofile(mode string, w io.Writer) {
 	gMapMu.RLock()
 	defer gMapMu.RUnlock()
 
@@ -491,6 +492,206 @@ func renderMap(mode string, coverMap map[string]*CoverEntry) string {
 
 func blockID(fileName string, blockIdx int) string {
 	return fmt.Sprintf("%s:%d", fileName, blockIdx)
+}
+
+// CoverReportData holds compact coverage data built from internal state.
+type CoverReportData struct {
+	Files  []string
+	Entry  []string
+	All    [][]int
+	Counts []CoverReportCountData
+}
+
+// CoverReportCountData holds a test name and its coverage entries.
+type CoverReportCountData struct {
+	Name         string
+	Coverprofile [][]int
+}
+
+// CollectCoverReportData builds compact coverage data from the current
+// internal state (allCoverprofileMap + CoverEntriesMap).
+func CollectCoverReportData() *CoverReportData {
+	allCoverprofileMapMu.RLock()
+	defer allCoverprofileMapMu.RUnlock()
+
+	// Collect unique file names and build file index.
+	fileSet := make(map[string]int)
+	var files []string
+	for _, key := range allCoverprofileMapKeys {
+		e := allCoverprofileMap[key]
+		if _, ok := fileSet[e.FileName]; !ok {
+			fileSet[e.FileName] = len(files)
+			files = append(files, e.FileName)
+		}
+	}
+	sort.Strings(files)
+	// Rebuild index after sorting.
+	for i, f := range files {
+		fileSet[f] = i
+	}
+
+	// Build block key to index map and "all" array.
+	type blockKey struct {
+		fileIdx  int
+		startLine, startCol, endLine, endCol, numStmts int
+	}
+	blockIndex := make(map[blockKey]int)
+	var all [][]int
+	for _, key := range allCoverprofileMapKeys {
+		e := allCoverprofileMap[key]
+		bk := blockKey{
+			fileIdx:   fileSet[e.FileName],
+			startLine: e.StartLine,
+			startCol:  e.StartCol,
+			endLine:   e.EndLine,
+			endCol:    e.EndCol,
+			numStmts:  e.NumStmts,
+		}
+		if _, ok := blockIndex[bk]; !ok {
+			blockIndex[bk] = len(all)
+			all = append(all, []int{bk.fileIdx, bk.startLine, bk.startCol, bk.endLine, bk.endCol, bk.numStmts})
+		}
+	}
+
+	// Build per-test counts.
+	entriesMap := CoverEntriesMap()
+	testNames := make([]string, 0, len(entriesMap))
+	for name := range entriesMap {
+		testNames = append(testNames, name)
+	}
+	sort.Strings(testNames)
+
+	counts := make([]CoverReportCountData, 0, len(testNames))
+	for _, name := range testNames {
+		entries := entriesMap[name]
+		profile := make([][]int, 0, len(entries))
+		for _, e := range entries {
+			bk := blockKey{
+				fileIdx:   fileSet[e.FileName],
+				startLine: e.StartLine,
+				startCol:  e.StartCol,
+				endLine:   e.EndLine,
+				endCol:    e.EndCol,
+				numStmts:  e.NumStmts,
+			}
+			idx, ok := blockIndex[bk]
+			if !ok {
+				continue
+			}
+			profile = append(profile, []int{idx, e.Count})
+		}
+		counts = append(counts, CoverReportCountData{
+			Name:         name,
+			Coverprofile: profile,
+		})
+	}
+
+	return &CoverReportData{
+		Files: files,
+		Entry: []string{"FileName", "StartLine", "StartCol", "EndLine", "EndCol", "StatementCount"},
+		All:   all,
+		Counts: counts,
+	}
+}
+
+// MarshalCoverJSON marshals the compact coverage report as JSON.
+// The output matches the tobari.CoverReport structure with nested metadata.
+func MarshalCoverJSON() ([]byte, error) {
+	data := CollectCoverReportData()
+	type jsonMetadata struct {
+		Files []string `json:"files"`
+		Entry []string `json:"entry"`
+		All   [][]int  `json:"all"`
+	}
+	type jsonCount struct {
+		Name         string  `json:"name"`
+		Coverprofile [][]int `json:"coverprofile"`
+	}
+	type jsonReport struct {
+		Metadata jsonMetadata `json:"metadata"`
+		Counts   []jsonCount  `json:"counts"`
+	}
+	counts := make([]jsonCount, len(data.Counts))
+	for i, c := range data.Counts {
+		counts[i] = jsonCount(c)
+	}
+	return json.Marshal(jsonReport{
+		Metadata: jsonMetadata{
+			Files: data.Files,
+			Entry: data.Entry,
+			All:   data.All,
+		},
+		Counts: counts,
+	})
+}
+
+// MarshalCoverTOON marshals the compact coverage report in human-readable TOON format.
+func MarshalCoverTOON() ([]byte, error) {
+	return MarshalReportDataTOON(CollectCoverReportData())
+}
+
+// MarshalReportDataTOON renders CoverReportData in human-readable TOON format.
+func MarshalReportDataTOON(data *CoverReportData) ([]byte, error) {
+	var buf bytes.Buffer
+
+	// metadata section
+	fmt.Fprintf(&buf, "metadata:\n")
+	fmt.Fprintf(&buf, "  files:\n")
+	for _, f := range data.Files {
+		fmt.Fprintf(&buf, "    %s\n", f)
+	}
+	fmt.Fprintf(&buf, "  entry: %s\n", strings.Join(data.Entry, ","))
+	fmt.Fprintf(&buf, "  all[%d]:\n", len(data.All))
+	for _, block := range data.All {
+		if len(block) != 6 {
+			continue
+		}
+		fileIdx := block[0]
+		fileName := ""
+		if fileIdx >= 0 && fileIdx < len(data.Files) {
+			fileName = data.Files[fileIdx]
+		}
+		fmt.Fprintf(&buf, "    %s,%d,%d,%d,%d,%d\n", fileName, block[1], block[2], block[3], block[4], block[5])
+	}
+
+	// counts section
+	names := make([]string, len(data.Counts))
+	for i, c := range data.Counts {
+		names[i] = c.Name
+	}
+	sort.Strings(names)
+
+	countsByName := make(map[string]CoverReportCountData, len(data.Counts))
+	for _, c := range data.Counts {
+		countsByName[c.Name] = c
+	}
+
+	fmt.Fprintf(&buf, "counts:\n")
+	for _, name := range names {
+		c := countsByName[name]
+		fmt.Fprintf(&buf, "  %s[%d]{FileName,StartLine,StartCol,EndLine,EndCol,StatementCount,Count}:\n", name, len(c.Coverprofile))
+		for _, cp := range c.Coverprofile {
+			if len(cp) != 2 {
+				continue
+			}
+			blockIdx := cp[0]
+			count := cp[1]
+			if blockIdx < 0 || blockIdx >= len(data.All) {
+				continue
+			}
+			block := data.All[blockIdx]
+			if len(block) != 6 {
+				continue
+			}
+			fileIdx := block[0]
+			fileName := ""
+			if fileIdx >= 0 && fileIdx < len(data.Files) {
+				fileName = data.Files[fileIdx]
+			}
+			fmt.Fprintf(&buf, "    %s,%d,%d,%d,%d,%d,%d\n", fileName, block[1], block[2], block[3], block[4], block[5], count)
+		}
+	}
+	return buf.Bytes(), nil
 }
 
 func EncodeMeta() ([]byte, error) {

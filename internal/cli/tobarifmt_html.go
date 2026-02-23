@@ -6,12 +6,12 @@ import (
 	"text/template"
 )
 
-func generateViewHTML(w io.Writer, data *viewData) error {
+func generateTobarifmtHTML(w io.Writer, data *tobarifmtData) error {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	tmpl, err := template.New("view").Parse(viewHTMLTemplate)
+	tmpl, err := template.New("tobarifmt").Parse(tobarifmtHTMLTemplate)
 	if err != nil {
 		return err
 	}
@@ -20,7 +20,7 @@ func generateViewHTML(w io.Writer, data *viewData) error {
 	})
 }
 
-const viewHTMLTemplate = `<!DOCTYPE html>
+const tobarifmtHTMLTemplate = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">

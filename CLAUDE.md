@@ -8,4 +8,4 @@
 
 ## Documentation Rules
 
-- When modifying the `tobari view` command, always update `docs/cli/view.md` accordingly.
+- When modifying the `tobari html` command, always update `docs/cli/html.md` accordingly.
