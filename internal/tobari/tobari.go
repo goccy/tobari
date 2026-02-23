@@ -588,7 +588,7 @@ func CollectCoverReportData() *CoverReportData {
 
 	return &CoverReportData{
 		Files: files,
-		Entry: []string{"file", "startLine", "startCol", "endLine", "endCol", "stmts"},
+		Entry: []string{"FileName", "StartLine", "StartCol", "EndLine", "EndCol", "StatementCount"},
 		All:   all,
 		Counts: counts,
 	}
@@ -633,6 +633,28 @@ func MarshalCoverTOON() ([]byte, error) {
 // MarshalReportDataTOON renders CoverReportData in human-readable TOON format.
 func MarshalReportDataTOON(data *CoverReportData) ([]byte, error) {
 	var buf bytes.Buffer
+
+	// metadata section
+	fmt.Fprintf(&buf, "metadata:\n")
+	fmt.Fprintf(&buf, "  files:\n")
+	for _, f := range data.Files {
+		fmt.Fprintf(&buf, "    %s\n", f)
+	}
+	fmt.Fprintf(&buf, "  entry: %s\n", strings.Join(data.Entry, ","))
+	fmt.Fprintf(&buf, "  all[%d]:\n", len(data.All))
+	for _, block := range data.All {
+		if len(block) != 6 {
+			continue
+		}
+		fileIdx := block[0]
+		fileName := ""
+		if fileIdx >= 0 && fileIdx < len(data.Files) {
+			fileName = data.Files[fileIdx]
+		}
+		fmt.Fprintf(&buf, "    %s,%d,%d,%d,%d,%d\n", fileName, block[1], block[2], block[3], block[4], block[5])
+	}
+
+	// counts section
 	names := make([]string, len(data.Counts))
 	for i, c := range data.Counts {
 		names[i] = c.Name
@@ -644,9 +666,10 @@ func MarshalReportDataTOON(data *CoverReportData) ([]byte, error) {
 		countsByName[c.Name] = c
 	}
 
+	fmt.Fprintf(&buf, "counts:\n")
 	for _, name := range names {
 		c := countsByName[name]
-		fmt.Fprintf(&buf, "%s[%d]{FileName,StartLine,StartCol,EndLine,EndCol,StatementCount,Count}:\n", name, len(c.Coverprofile))
+		fmt.Fprintf(&buf, "  %s[%d]{FileName,StartLine,StartCol,EndLine,EndCol,StatementCount,Count}:\n", name, len(c.Coverprofile))
 		for _, cp := range c.Coverprofile {
 			if len(cp) != 2 {
 				continue
@@ -665,7 +688,7 @@ func MarshalReportDataTOON(data *CoverReportData) ([]byte, error) {
 			if fileIdx >= 0 && fileIdx < len(data.Files) {
 				fileName = data.Files[fileIdx]
 			}
-			fmt.Fprintf(&buf, "\t%s,%d,%d,%d,%d,%d,%d\n", fileName, block[1], block[2], block[3], block[4], block[5], count)
+			fmt.Fprintf(&buf, "    %s,%d,%d,%d,%d,%d,%d\n", fileName, block[1], block[2], block[3], block[4], block[5], count)
 		}
 	}
 	return buf.Bytes(), nil
