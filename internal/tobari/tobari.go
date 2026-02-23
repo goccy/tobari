@@ -613,10 +613,7 @@ func MarshalCoverJSON() ([]byte, error) {
 	}
 	counts := make([]jsonCount, len(data.Counts))
 	for i, c := range data.Counts {
-		counts[i] = jsonCount{
-			Name:         c.Name,
-			Coverprofile: c.Coverprofile,
-		}
+		counts[i] = jsonCount(c)
 	}
 	return json.Marshal(jsonReport{
 		Metadata: jsonMetadata{
