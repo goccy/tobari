@@ -595,8 +595,37 @@ func CollectCoverReportData() *CoverReportData {
 }
 
 // MarshalCoverJSON marshals the compact coverage report as JSON.
+// The output matches the tobari.CoverReport structure with nested metadata.
 func MarshalCoverJSON() ([]byte, error) {
-	return json.Marshal(CollectCoverReportData())
+	data := CollectCoverReportData()
+	type jsonMetadata struct {
+		Files []string `json:"files"`
+		Entry []string `json:"entry"`
+		All   [][]int  `json:"all"`
+	}
+	type jsonCount struct {
+		Name         string  `json:"name"`
+		Coverprofile [][]int `json:"coverprofile"`
+	}
+	type jsonReport struct {
+		Metadata jsonMetadata `json:"metadata"`
+		Counts   []jsonCount  `json:"counts"`
+	}
+	counts := make([]jsonCount, len(data.Counts))
+	for i, c := range data.Counts {
+		counts[i] = jsonCount{
+			Name:         c.Name,
+			Coverprofile: c.Coverprofile,
+		}
+	}
+	return json.Marshal(jsonReport{
+		Metadata: jsonMetadata{
+			Files: data.Files,
+			Entry: data.Entry,
+			All:   data.All,
+		},
+		Counts: counts,
+	})
 }
 
 // MarshalCoverTOON marshals the compact coverage report in human-readable TOON format.
