@@ -254,17 +254,12 @@ func TestRunHTMLCmd_TobariJSON_MergesCounts(t *testing.T) {
 			{Name: "TestMain", Coverprofile: [][]int{{0, 2}, {1, 1}}},
 		},
 	}
-	data, err := json.Marshal(report)
-	if err != nil {
-		t.Fatal(err)
+	var buf strings.Builder
+	if err := report.WriteCoverprofile(&buf); err != nil {
+		t.Fatalf("WriteCoverprofile() error = %v", err)
 	}
 
-	profile, err := tobariJSONToCoverprofile(data)
-	if err != nil {
-		t.Fatalf("tobariJSONToCoverprofile() error = %v", err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(profile), "\n")
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 
 	// TestAdd has Count=3, TestMain has Count=2 for block 0 (3.24,5.2).
 	// They should be summed to 5.
@@ -279,7 +274,7 @@ func TestRunHTMLCmd_TobariJSON_MergesCounts(t *testing.T) {
 		}
 	}
 	if !foundMerged {
-		t.Errorf("block 3.24,5.2 not found in merged coverprofile:\n%s", profile)
+		t.Errorf("block 3.24,5.2 not found in merged coverprofile:\n%s", buf.String())
 	}
 
 	// Block 2 (11.1,13.2) is in metadata.all but no test covers it.
@@ -295,12 +290,12 @@ func TestRunHTMLCmd_TobariJSON_MergesCounts(t *testing.T) {
 		}
 	}
 	if !foundUncovered {
-		t.Errorf("uncovered block 11.1,13.2 not found in coverprofile:\n%s", profile)
+		t.Errorf("uncovered block 11.1,13.2 not found in coverprofile:\n%s", buf.String())
 	}
 
 	// Total: mode line + 3 blocks = 4 lines.
 	if len(lines) != 4 {
-		t.Errorf("expected 4 lines (mode + 3 blocks), got %d:\n%s", len(lines), profile)
+		t.Errorf("expected 4 lines (mode + 3 blocks), got %d:\n%s", len(lines), buf.String())
 	}
 }
 

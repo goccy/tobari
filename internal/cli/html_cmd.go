@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/goccy/tobari"
@@ -183,60 +182,6 @@ type tobariJSONEntry struct {
 type tobariEntryPos struct {
 	Line   int `json:"Line"`
 	Column int `json:"Column"`
-}
-
-func tobariJSONToCoverprofile(data []byte) (string, error) {
-	// Try compact format first to use CoverReport.WriteCoverprofile.
-	var report tobari.CoverReport
-	if err := json.Unmarshal(data, &report); err == nil && report.Metadata.Files != nil {
-		var b strings.Builder
-		if err := report.WriteCoverprofile(&b); err != nil {
-			return "", err
-		}
-		return b.String(), nil
-	}
-
-	// Legacy format: merge entries across tests.
-	var entriesMap map[string][]tobariJSONEntry
-	if err := json.Unmarshal(data, &entriesMap); err != nil {
-		return "", fmt.Errorf("failed to decode tobari.json: %w", err)
-	}
-	return legacyEntriesToCoverprofile(entriesMap), nil
-}
-
-// legacyEntriesToCoverprofile merges legacy format entries across tests.
-func legacyEntriesToCoverprofile(entriesMap map[string][]tobariJSONEntry) string {
-	type mergedEntry struct {
-		tobariJSONEntry
-		key string
-	}
-	merged := make(map[string]*mergedEntry)
-	var keys []string
-
-	for _, entries := range entriesMap {
-		for _, e := range entries {
-			key := fmt.Sprintf("%s:%d.%d,%d.%d",
-				e.FileName, e.Start.Line, e.Start.Column,
-				e.End.Line, e.End.Column)
-			if existing, ok := merged[key]; ok {
-				existing.Count += e.Count
-			} else {
-				entry := e
-				merged[key] = &mergedEntry{tobariJSONEntry: entry, key: key}
-				keys = append(keys, key)
-			}
-		}
-	}
-
-	sort.Strings(keys)
-
-	var b strings.Builder
-	b.WriteString("mode: set\n")
-	for _, key := range keys {
-		e := merged[key]
-		fmt.Fprintf(&b, "%s %d %d\n", key, e.StatementCount, e.Count)
-	}
-	return b.String()
 }
 
 func replacePathsInCoverprofile(content, sourceDir string) string {
