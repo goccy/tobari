@@ -193,7 +193,7 @@ func createCovervars(pkgcfg *PackageConfig, pkgcfgPath string, inputFiles []stri
 package %[1]s
 
 import (
-   _ "unsafe"
+   "unsafe"
 )
 
 %[3]s
@@ -214,6 +214,25 @@ func %[2]s_AddCoverMeta(string) bool
 
 //go:linkname %[2]s_AddEmbeddedSource github.com/goccy/tobari/internal/tobari.AddEmbeddedSource
 func %[2]s_AddEmbeddedSource(string, string) bool
+
+//go:linkname %[2]s_TraceChan github.com/goccy/tobari/internal/tobari.TraceChan
+func %[2]s_TraceChan(uintptr, uint64, bool)
+
+func %[2]s_chanID(ch any) uintptr {
+	return (*[2]uintptr)(unsafe.Pointer(&ch))[1]
+}
+
+func %[2]s_afterRecv[T any](chanID uintptr, v T) T {
+	%[2]s_TraceChan(chanID, %[2]s_GID(), false)
+	return v
+}
+
+func %[2]s_beforeSend[T any](chanID uintptr, v T) T {
+	%[2]s_TraceChan(chanID, %[2]s_GID(), true)
+	return v
+}
+
+var _ = unsafe.Pointer(nil)
 
 var _ = %[2]s_SetGIDFunc(func() uint64 { return %[2]s_GID() })
 var _ = func() bool {
@@ -334,6 +353,7 @@ type File struct {
 	funcDep             *FunctionDependency
 	pkgcfg              *PackageConfig
 	anonymGlobalFuncIdx int
+	commClauseRecvPos   map[token.Pos]struct{} // positions of <-ch inside CommClause.Comm to skip wrapping
 }
 
 func (f *File) nextBlockIndex() int {
@@ -381,6 +401,7 @@ func addTracePointWithContent(pkgcfg *PackageConfig, dep *FunctionDependency, fi
 		funcDep:             dep,
 		pkgcfg:              pkgcfg,
 		anonymGlobalFuncIdx: 1,
+		commClauseRecvPos:   collectCommClauseRecvPos(parsedFile),
 	}
 
 	// Walk the AST and instrument code
@@ -460,6 +481,18 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 			case *ast.CommClause: // select
 				for _, stmt := range n.List {
 					clause := stmt.(*ast.CommClause)
+					if f.funcDep != nil {
+						if chSrc, isSend := f.channelExprFromComm(clause.Comm); chSrc != "" {
+							if isSend {
+								// Send in select: wrap value expression via SendStmt case
+								// (handled when the walk visits the SendStmt inside Comm)
+							} else {
+								// Receive in select: insert TraceChan at case body start
+								f.edit.Insert(f.offset(clause.Colon)+1,
+									fmt.Sprintf("%s_TraceChan(%s_chanID(%s),%s_GID(),false);", tobariPkg, tobariPkg, chSrc, tobariPkg))
+							}
+						}
+					}
 					f.addCounters(clause.Colon+1, clause.Colon+1, clause.End(), clause.Body, false)
 				}
 				return f
@@ -576,6 +609,35 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 		ast.Walk(f, n.Body)
 		f.curFunc = parent
 		return nil
+	case *ast.SendStmt:
+		// ch <- value → ch <- _tobari_beforeSend(chanID, value)
+		if f.funcDep != nil {
+			chSrc := string(f.content[f.offset(n.Chan.Pos()):f.offset(n.Chan.End())])
+			f.edit.Insert(f.offset(n.Value.Pos()),
+				fmt.Sprintf("%s_beforeSend(%s_chanID(%s),", tobariPkg, tobariPkg, chSrc))
+			f.edit.Insert(f.offset(n.Value.End()), ")")
+		}
+	case *ast.UnaryExpr:
+		// <-ch → _tobari_afterRecv(chanID, <-ch)
+		if n.Op == token.ARROW && f.funcDep != nil {
+			if _, skip := f.commClauseRecvPos[n.Pos()]; !skip {
+				chSrc := string(f.content[f.offset(n.X.Pos()):f.offset(n.X.End())])
+				f.edit.Insert(f.offset(n.Pos()),
+					fmt.Sprintf("%s_afterRecv(%s_chanID(%s),", tobariPkg, tobariPkg, chSrc))
+				f.edit.Insert(f.offset(n.End()), ")")
+			}
+		}
+	case *ast.RangeStmt:
+		// for v := range ch { → insert TraceChan at loop body start
+		if f.funcDep != nil && f.funcDep.ChanRanges != nil {
+			pos := f.fset.Position(n.X.Pos())
+			key := funcPos{Filename: filepath.Clean(pos.Filename), Offset: pos.Offset}
+			if _, ok := f.funcDep.ChanRanges[key]; ok {
+				chSrc := string(f.content[f.offset(n.X.Pos()):f.offset(n.X.End())])
+				f.edit.Insert(f.offset(n.Body.Lbrace)+1,
+					fmt.Sprintf("%s_TraceChan(%s_chanID(%s),%s_GID(),false);", tobariPkg, tobariPkg, chSrc, tobariPkg))
+			}
+		}
 	}
 	return f
 }
@@ -587,6 +649,54 @@ func (f *File) createAnonymFuncName(fn *Function) string {
 	}
 	defer func() { fn.anonymFuncIdx++ }()
 	return fmt.Sprintf("%s$%d", fn.name, fn.anonymFuncIdx)
+}
+
+// collectCommClauseRecvPos pre-scans the AST to find all receive expressions
+// inside CommClause.Comm (select case statements). These positions are used to
+// skip wrapping with afterRecv, since select case syntax does not allow it.
+func collectCommClauseRecvPos(file *ast.File) map[token.Pos]struct{} {
+	pos := make(map[token.Pos]struct{})
+	ast.Inspect(file, func(n ast.Node) bool {
+		cc, ok := n.(*ast.CommClause)
+		if !ok {
+			return true
+		}
+		if cc.Comm == nil {
+			return true
+		}
+		// Collect all receive UnaryExpr positions inside Comm
+		ast.Inspect(cc.Comm, func(inner ast.Node) bool {
+			if ue, ok := inner.(*ast.UnaryExpr); ok && ue.Op == token.ARROW {
+				pos[ue.Pos()] = struct{}{}
+			}
+			return true
+		})
+		return true
+	})
+	return pos
+}
+
+// channelExprFromComm extracts the channel source expression and whether it's a
+// send operation from a CommClause's Comm statement.
+func (f *File) channelExprFromComm(comm ast.Stmt) (string, bool) {
+	if comm == nil {
+		return "", false
+	}
+	switch s := comm.(type) {
+	case *ast.SendStmt:
+		return string(f.content[f.offset(s.Chan.Pos()):f.offset(s.Chan.End())]), true
+	case *ast.ExprStmt:
+		if unary, ok := s.X.(*ast.UnaryExpr); ok && unary.Op == token.ARROW {
+			return string(f.content[f.offset(unary.X.Pos()):f.offset(unary.X.End())]), false
+		}
+	case *ast.AssignStmt:
+		for _, rhs := range s.Rhs {
+			if unary, ok := rhs.(*ast.UnaryExpr); ok && unary.Op == token.ARROW {
+				return string(f.content[f.offset(unary.X.Pos()):f.offset(unary.X.End())]), false
+			}
+		}
+	}
+	return "", false
 }
 
 // findText finds text in the original source, starting at pos.
@@ -877,6 +987,7 @@ type edit struct {
 	start   int
 	end     int
 	newText string
+	seq     int
 }
 
 // NewBuffer creates a new edit buffer
@@ -893,6 +1004,7 @@ func (b *Buffer) Insert(offset int, text string) {
 		start:   offset,
 		end:     offset,
 		newText: text,
+		seq:     len(b.edits),
 	})
 }
 
@@ -902,6 +1014,7 @@ func (b *Buffer) Replace(start, end int, newText string) {
 		start:   start,
 		end:     end,
 		newText: newText,
+		seq:     len(b.edits),
 	})
 }
 
@@ -911,9 +1024,14 @@ func (b *Buffer) Bytes() []byte {
 		return b.original
 	}
 
-	// Sort edits by start position (reverse order for correct application)
-	sort.Slice(b.edits, func(i, j int) bool {
-		return b.edits[i].start > b.edits[j].start
+	// Sort edits by start position (reverse order for correct application).
+	// For same-position inserts, later-added edits (higher seq) come first
+	// so they are applied first and end up closer to the original code.
+	sort.SliceStable(b.edits, func(i, j int) bool {
+		if b.edits[i].start != b.edits[j].start {
+			return b.edits[i].start > b.edits[j].start
+		}
+		return b.edits[i].seq > b.edits[j].seq
 	})
 
 	result := make([]byte, len(b.original))

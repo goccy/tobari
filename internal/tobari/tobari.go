@@ -30,10 +30,13 @@ func DisableCoverageCounting() {
 func ClearCounters() {
 	entryMapMu.Lock()
 	gMapMu.Lock()
+	chanGIDMapMu.Lock()
 
 	entryMap = make(map[string]*TraceEntry)
 	gMap = make(map[uint64]*TraceG)
+	chanGIDMap = make(map[uintptr][]uint64)
 
+	chanGIDMapMu.Unlock()
 	gMapMu.Unlock()
 	entryMapMu.Unlock()
 }
@@ -107,7 +110,7 @@ func WriteAllCoverprofile(mode string, w io.Writer) {
 
 	blockToCountMap := make(map[string]int)
 	for _, g := range gMap {
-		g.blockToCountMap(blockToCountMap)
+		g.blockToCountMap(blockToCountMap, make(map[uint64]struct{}))
 	}
 
 	newCoverprofileMap := make(map[string]*CoverEntry)
@@ -182,7 +185,7 @@ func (e *CoverEntry) String() string {
 func (e *TraceEntry) CoverprofileMap() map[string]*CoverEntry {
 	blockToCountMap := make(map[string]int)
 	for _, root := range e.Roots {
-		root.blockToCountMap(blockToCountMap)
+		root.blockToCountMap(blockToCountMap, make(map[uint64]struct{}))
 	}
 
 	newCoverprofileMap := make(map[string]*CoverEntry)
@@ -282,15 +285,20 @@ func (g *TraceG) linkG(child *TraceG) {
 	g.Children = append(g.Children, child)
 }
 
-func (g *TraceG) blockToCountMap(blockToCountMap map[string]int) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+func (g *TraceG) blockToCountMap(blockToCountMap map[string]int, visited map[uint64]struct{}) {
+	if _, ok := visited[g.ID]; ok {
+		return
+	}
+	visited[g.ID] = struct{}{}
+
+	g.mu.RLock()
+	defer g.mu.RUnlock()
 
 	for blockID, count := range g.BlockCounterMap {
 		blockToCountMap[blockID] += count
 	}
 	for _, child := range g.Children {
-		child.blockToCountMap(blockToCountMap)
+		child.blockToCountMap(blockToCountMap, visited)
 	}
 }
 
@@ -313,6 +321,8 @@ var (
 	allCoverprofileMap     map[string]*CoverEntry
 	allCoverprofileMapKeys []string
 	allCoverprofileMapMu   sync.RWMutex
+	chanGIDMap             map[uintptr][]uint64 // channelID → sender GIDs
+	chanGIDMapMu           sync.Mutex
 )
 
 func SetGIDFunc(fn func() uint64) bool {
@@ -346,6 +356,54 @@ func getBlock(blockID string) *Block {
 	defer blockMapMu.RUnlock()
 
 	return blockMap[blockID]
+}
+
+// TraceChan records a channel operation for cross-goroutine coverage linking.
+// chanID is the hchan pointer (extracted via unsafe at the call site).
+// When isSend is true, the goroutine is registered as a sender on the channel.
+// When isSend is false (receive), the receiver is linked as a child of all senders.
+func TraceChan(chanID uintptr, gid uint64, isSend bool) {
+	isEnabledTraceMu.RLock()
+	if !isEnabledTrace {
+		isEnabledTraceMu.RUnlock()
+		return
+	}
+	isEnabledTraceMu.RUnlock()
+
+	if chanID == 0 {
+		return
+	}
+
+	chanGIDMapMu.Lock()
+	defer chanGIDMapMu.Unlock()
+
+	if isSend {
+		senders := chanGIDMap[chanID]
+		for _, s := range senders {
+			if s == gid {
+				return
+			}
+		}
+		chanGIDMap[chanID] = append(senders, gid)
+		return
+	}
+
+	// Receive: link this receiver as child of all senders.
+	gMapMu.Lock()
+	g := gMap[gid]
+	if g == nil {
+		g = newTraceG(gid)
+		gMap[gid] = g
+	}
+	for _, sendGID := range chanGIDMap[chanID] {
+		if sendGID == gid {
+			continue
+		}
+		if sendG := gMap[sendGID]; sendG != nil {
+			sendG.linkG(g)
+		}
+	}
+	gMapMu.Unlock()
 }
 
 func Trace(fileName string, pgid, gid uint64, blockIdx, startLine, endLine, startCol, endCol, numStmts int) {
@@ -407,17 +465,20 @@ func initMap() {
 		blockMapMu.Lock()
 		funcMapMu.Lock()
 		allCoverprofileMapMu.Lock()
+		chanGIDMapMu.Lock()
 		defer entryMapMu.Unlock()
 		defer gMapMu.Unlock()
 		defer blockMapMu.Unlock()
 		defer funcMapMu.Unlock()
 		defer allCoverprofileMapMu.Unlock()
+		defer chanGIDMapMu.Unlock()
 
 		entryMap = make(map[string]*TraceEntry)
 		gMap = make(map[uint64]*TraceG)
 		blockMap = make(map[string]*Block)
 		funcMap = make(map[string]*Function)
 		allCoverprofileMap = make(map[string]*CoverEntry)
+		chanGIDMap = make(map[uintptr][]uint64)
 	})
 }
 
@@ -714,7 +775,7 @@ func EncodeCounters() ([]byte, error) {
 
 	blockToCountMap := make(map[string]int)
 	for _, g := range gMap {
-		g.blockToCountMap(blockToCountMap)
+		g.blockToCountMap(blockToCountMap, make(map[uint64]struct{}))
 	}
 
 	var allFnCounters []CoverageFuncCounter
