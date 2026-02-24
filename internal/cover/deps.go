@@ -16,9 +16,17 @@ import (
 	"golang.org/x/tools/go/ssa/ssautil"
 )
 
+// funcPos identifies a function by its source position (file + byte offset).
+type funcPos struct {
+	Filename string
+	Offset   int
+}
+
 type FunctionDependency struct {
 	PkgPath string
 	DepMap  map[string][]string
+	// FuncNames maps source position → SSA FQDN for all functions in the target package.
+	FuncNames map[funcPos]string
 }
 
 func createFunctionDependencyMap(pkgcfg *PackageConfig, path string) (*FunctionDependency, error) {
@@ -29,15 +37,24 @@ func createFunctionDependencyMap(pkgcfg *PackageConfig, path string) (*FunctionD
 
 	graph := vta.CallGraph(ssautil.AllFunctions(prog), cha.CallGraph(prog))
 	depMap := make(map[string][]string)
+	funcNames := make(map[funcPos]string)
 	for _, n := range graph.Nodes {
 		if n.Func == nil || n.Func.Pkg != targetPkg {
 			continue
 		}
 		depMap[n.Func.String()] = analyzeFuncDeps(targetPkg, n)
+		if n.Func.Pos().IsValid() {
+			pos := prog.Fset.Position(n.Func.Pos())
+			funcNames[funcPos{
+				Filename: filepath.Clean(pos.Filename),
+				Offset:   pos.Offset,
+			}] = n.Func.String()
+		}
 	}
 	return &FunctionDependency{
-		PkgPath: targetPkg.Pkg.Path(),
-		DepMap:  depMap,
+		PkgPath:   targetPkg.Pkg.Path(),
+		DepMap:    depMap,
+		FuncNames: funcNames,
 	}, nil
 }
 

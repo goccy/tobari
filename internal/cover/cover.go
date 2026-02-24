@@ -410,21 +410,20 @@ var _ = %s_AddCoverMeta(%q)
 func (f *File) renderMetadata() (string, error) {
 	funcs := make([]*tobari.Function, 0, len(f.funcs))
 	for _, fn := range f.funcs {
-		// When "-mod testmain" is specified, funcDep becomes nil, so the process is skipped.
+		// When "-mode testmain" is specified, funcDep becomes nil, so the process is skipped.
 		if f.funcDep == nil {
 			continue
 		}
-		fqdn := f.normalizeFunctionFQDN(fn.name, f.funcDep.PkgPath)
-		depNames := make([]string, 0, len(f.funcDep.DepMap))
-		for name := range f.funcDep.DepMap {
-			depNames = append(depNames, name)
-		}
-		deps, exists := f.funcDep.DepMap[fqdn]
+		deps, exists := f.funcDep.DepMap[fn.name]
 		if !exists {
-			return "", fmt.Errorf("failed to find function dependencies %s from %v", fqdn, depNames)
+			depNames := make([]string, 0, len(f.funcDep.DepMap))
+			for name := range f.funcDep.DepMap {
+				depNames = append(depNames, name)
+			}
+			return "", fmt.Errorf("failed to find function dependencies %s from %v", fn.name, depNames)
 		}
 		funcs = append(funcs, &tobari.Function{
-			Name:   fqdn,
+			Name:   fn.name,
 			Blocks: fn.blocks,
 			Deps:   deps,
 		})
@@ -440,21 +439,6 @@ func (f *File) renderMetadata() (string, error) {
 		return "", fmt.Errorf("failed to encode tobari's metadata: %w", err)
 	}
 	return string(b), nil
-}
-
-func (f *File) normalizeFunctionFQDN(fname, pkgPath string) string {
-	parts := strings.Split(fname, ".")
-
-	if len(parts) == 1 {
-		return fmt.Sprintf("%s.%s", f.funcDep.PkgPath, fname)
-	}
-
-	// method definition.
-	if strings.HasPrefix(parts[0], "*") {
-		// pointer receiver.
-		return fmt.Sprintf("(*%s.%s).%s", pkgPath, parts[0][1:], parts[1])
-	}
-	return fmt.Sprintf("(%s.%s).%s", pkgPath, parts[0], parts[1])
 }
 
 func (f *File) offset(pos token.Pos) int {
@@ -559,17 +543,13 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 		if n.Name.Name == "_" || n.Body == nil {
 			return nil
 		}
-		// Determine proper function or method name.
 		fname := n.Name.Name
-		if r := n.Recv; r != nil && len(r.List) == 1 {
-			t := r.List[0].Type
-			star := ""
-			if p, _ := t.(*ast.StarExpr); p != nil {
-				t = p.X
-				star = "*"
-			}
-			if p, _ := t.(*ast.Ident); p != nil {
-				fname = star + p.Name + "." + fname
+		if f.funcDep != nil && len(f.funcDep.FuncNames) != 0 {
+			// SSA's Function.Pos() returns FuncDecl.Name position (not the func keyword).
+			pos := f.fset.Position(n.Name.Pos())
+			key := funcPos{Filename: filepath.Clean(pos.Filename), Offset: pos.Offset}
+			if fqdn, ok := f.funcDep.FuncNames[key]; ok {
+				fname = fqdn
 			}
 		}
 		parent := f.curFunc
@@ -581,7 +561,15 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 		return nil
 	case *ast.FuncLit:
 		parent := f.curFunc
-		fname := f.createAnonymFuncName(parent)
+		var fname string
+		if f.funcDep != nil && len(f.funcDep.FuncNames) != 0 {
+			pos := f.fset.Position(n.Pos())
+			key := funcPos{Filename: filepath.Clean(pos.Filename), Offset: pos.Offset}
+			fname = f.funcDep.FuncNames[key]
+		}
+		if fname == "" {
+			fname = f.createAnonymFuncName(parent)
+		}
 		fn := newFunction(fname)
 		f.curFunc = fn
 		f.funcs = append(f.funcs, fn)
@@ -597,14 +585,7 @@ func (f *File) createAnonymFuncName(fn *Function) string {
 		defer func() { f.anonymGlobalFuncIdx++ }()
 		return fmt.Sprintf("init$%d", f.anonymGlobalFuncIdx)
 	}
-
 	defer func() { fn.anonymFuncIdx++ }()
-	if fn.name == "init" {
-		// TODO: It is not possible to determine how many other init functions are defined from the information in the current file,
-		// so it is always counted as #1.
-		// This logic will cause issues if there are multiple init functions.
-		return fmt.Sprintf("init#1$%d", fn.anonymFuncIdx)
-	}
 	return fmt.Sprintf("%s$%d", fn.name, fn.anonymFuncIdx)
 }
 
