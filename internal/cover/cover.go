@@ -236,6 +236,16 @@ func %[2]s_sendChan[T any](ch chan<- T) chan<- T {
 	return ch
 }
 
+func %[2]s_selectRecv[T any](ch <-chan T, token *uintptr) <-chan T {
+	*token = %[2]s_chanIDRecv(ch)
+	return ch
+}
+
+func %[2]s_selectSend[T any](ch chan<- T, token *uintptr) chan<- T {
+	*token = %[2]s_chanIDSend(ch)
+	return ch
+}
+
 var _ = unsafe.Pointer(nil)
 
 var _ = %[2]s_SetGIDFunc(func() uint64 { return %[2]s_GID() })
@@ -357,6 +367,9 @@ type File struct {
 	funcDep             *FunctionDependency
 	pkgcfg              *PackageConfig
 	anonymGlobalFuncIdx int
+	commClauseCommPos   map[token.Pos]struct{} // positions of CommClause.Comm send/recv to skip wrapping
+	selectInstrumented  map[token.Pos]struct{}
+	selectTokenIdx      int
 }
 
 func (f *File) nextBlockIndex() int {
@@ -404,6 +417,9 @@ func addTracePointWithContent(pkgcfg *PackageConfig, dep *FunctionDependency, fi
 		funcDep:             dep,
 		pkgcfg:              pkgcfg,
 		anonymGlobalFuncIdx: 1,
+		commClauseCommPos:   collectCommClauseCommPos(parsedFile),
+		selectInstrumented:  make(map[token.Pos]struct{}),
+		selectTokenIdx:      1,
 	}
 
 	// Walk the AST and instrument code
@@ -480,12 +496,12 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 					f.addCounters(clause.Colon+1, clause.Colon+1, clause.End(), clause.Body, false)
 				}
 				return f
-				case *ast.CommClause: // select
-					for _, stmt := range n.List {
-						clause := stmt.(*ast.CommClause)
-						f.addCounters(clause.Colon+1, clause.Colon+1, clause.End(), clause.Body, false)
-					}
-					return f
+			case *ast.CommClause: // select
+				for _, stmt := range n.List {
+					clause := stmt.(*ast.CommClause)
+					f.addCounters(clause.Colon+1, clause.Colon+1, clause.End(), clause.Body, false)
+				}
+				return f
 			}
 		}
 		f.addCounters(n.Lbrace, n.Lbrace+1, n.Rbrace+1, n.List, true)
@@ -540,6 +556,17 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 		// Don't annotate an empty select - creates a syntax error.
 		if n.Body == nil || len(n.Body.List) == 0 {
 			return nil
+		}
+		if f.funcDep != nil {
+			if _, ok := f.selectInstrumented[n.Pos()]; !ok {
+				f.instrumentSelect(n, n.Pos())
+			}
+		}
+	case *ast.LabeledStmt:
+		if sel, ok := n.Stmt.(*ast.SelectStmt); ok && f.funcDep != nil {
+			if _, ok := f.selectInstrumented[sel.Pos()]; !ok {
+				f.instrumentSelect(sel, n.Pos())
+			}
 		}
 	case *ast.SwitchStmt:
 		// Don't annotate an empty switch - creates a syntax error.
@@ -602,6 +629,9 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 	case *ast.SendStmt:
 		// ch <- value → _tobari_sendChan(ch) <- value
 		if f.funcDep != nil {
+			if _, skip := f.commClauseCommPos[n.Pos()]; skip {
+				return f
+			}
 			f.edit.Insert(f.offset(n.Chan.Pos()),
 				fmt.Sprintf("%s_sendChan(", tobariPkg))
 			f.edit.Insert(f.offset(n.Chan.End()), ")")
@@ -609,6 +639,9 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 	case *ast.UnaryExpr:
 		// <-ch → <-_tobari_afterRecvChan(ch)
 		if n.Op == token.ARROW && f.funcDep != nil {
+			if _, skip := f.commClauseCommPos[n.Pos()]; skip {
+				return f
+			}
 			f.edit.Insert(f.offset(n.X.Pos()),
 				fmt.Sprintf("%s_afterRecvChan(", tobariPkg))
 			f.edit.Insert(f.offset(n.X.End()), ")")
@@ -637,9 +670,121 @@ func (f *File) createAnonymFuncName(fn *Function) string {
 	return fmt.Sprintf("%s$%d", fn.name, fn.anonymFuncIdx)
 }
 
-// collectCommClauseRecvPos pre-scans the AST to find all receive expressions
+func (f *File) nextSelectToken() string {
+	defer func() { f.selectTokenIdx++ }()
+	return fmt.Sprintf("__tobari_select_id%d", f.selectTokenIdx)
+}
+
+func (f *File) instrumentSelect(n *ast.SelectStmt, insertPos token.Pos) {
+	if n.Body == nil || len(n.Body.List) == 0 {
+		return
+	}
+	f.selectInstrumented[n.Pos()] = struct{}{}
+
+	type caseInfo struct {
+		token  string
+		isSend bool
+		expr   ast.Expr
+		clause *ast.CommClause
+	}
+	var cases []caseInfo
+
+	for _, stmt := range n.Body.List {
+		clause := stmt.(*ast.CommClause)
+		if clause.Comm == nil {
+			continue
+		}
+		expr, isSend := selectCaseChannelExpr(clause.Comm)
+		if expr == nil {
+			continue
+		}
+		cases = append(cases, caseInfo{
+			token:  f.nextSelectToken(),
+			isSend: isSend,
+			expr:   expr,
+			clause: clause,
+		})
+	}
+
+	if len(cases) == 0 {
+		return
+	}
+
+	// Insert token variables before the select statement in source order.
+	for i := 0; i < len(cases); i++ {
+		c := cases[i]
+		f.edit.Insert(f.offset(insertPos), fmt.Sprintf("var %s uintptr;", c.token))
+	}
+
+	// Wrap channel expressions in select cases to record chanID, then trace only when selected.
+	for _, c := range cases {
+		if c.isSend {
+			f.edit.Insert(f.offset(c.expr.Pos()),
+				fmt.Sprintf("%s_selectSend(", tobariPkg))
+			f.edit.Insert(f.offset(c.expr.End()),
+				fmt.Sprintf(",&%s)", c.token))
+			f.edit.Insert(f.offset(c.clause.Colon)+1,
+				fmt.Sprintf("%s_TraceChan(%s,%s_GID(),true);", tobariPkg, c.token, tobariPkg))
+		} else {
+			f.edit.Insert(f.offset(c.expr.Pos()),
+				fmt.Sprintf("%s_selectRecv(", tobariPkg))
+			f.edit.Insert(f.offset(c.expr.End()),
+				fmt.Sprintf(",&%s)", c.token))
+			f.edit.Insert(f.offset(c.clause.Colon)+1,
+				fmt.Sprintf("%s_TraceChan(%s,%s_GID(),false);", tobariPkg, c.token, tobariPkg))
+		}
+	}
+}
+
+func selectCaseChannelExpr(comm ast.Stmt) (ast.Expr, bool) {
+	if comm == nil {
+		return nil, false
+	}
+	switch s := comm.(type) {
+	case *ast.SendStmt:
+		return s.Chan, true
+	case *ast.ExprStmt:
+		if unary, ok := s.X.(*ast.UnaryExpr); ok && unary.Op == token.ARROW {
+			return unary.X, false
+		}
+	case *ast.AssignStmt:
+		for _, rhs := range s.Rhs {
+			if unary, ok := rhs.(*ast.UnaryExpr); ok && unary.Op == token.ARROW {
+				return unary.X, false
+			}
+		}
+	}
+	return nil, false
+}
+
+// collectCommClauseCommPos pre-scans the AST to find all send/recv expressions
 // inside CommClause.Comm (select case statements). These positions are used to
-// skip wrapping with afterRecv, since select case syntax does not allow it.
+// skip wrapping so we can trace only selected cases.
+func collectCommClauseCommPos(file *ast.File) map[token.Pos]struct{} {
+	pos := make(map[token.Pos]struct{})
+	ast.Inspect(file, func(n ast.Node) bool {
+		cc, ok := n.(*ast.CommClause)
+		if !ok {
+			return true
+		}
+		if cc.Comm == nil {
+			return true
+		}
+		// Collect send and receive positions inside Comm
+		ast.Inspect(cc.Comm, func(inner ast.Node) bool {
+			if ss, ok := inner.(*ast.SendStmt); ok {
+				pos[ss.Pos()] = struct{}{}
+			}
+			if ue, ok := inner.(*ast.UnaryExpr); ok && ue.Op == token.ARROW {
+				pos[ue.Pos()] = struct{}{}
+			}
+			return true
+		})
+		return true
+	})
+	return pos
+}
+
 // findText finds text in the original source, starting at pos.
 // It correctly skips over comments and assumes it need not
 // handle quoted strings.

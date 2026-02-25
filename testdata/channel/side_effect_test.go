@@ -44,6 +44,21 @@ func TestChannelExprSelectRecvEvaluatedOnce(t *testing.T) {
 	}
 }
 
+func TestChannelExprSelectSendEvaluatedOnce(t *testing.T) {
+	resetSideEffects()
+	done := make(chan struct{})
+	go func() {
+		<-sideSelectSendCh
+		close(done)
+	}()
+	SelectSendWithSideEffect()
+	<-done
+
+	if got := atomic.LoadInt32(&selectSendCallCount); got != 1 {
+		t.Fatalf("select send channel expression evaluated %d times, want 1", got)
+	}
+}
+
 func TestChannelExprRangeEvaluatedOnce(t *testing.T) {
 	resetSideEffects()
 	go func() {

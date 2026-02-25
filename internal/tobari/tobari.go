@@ -29,15 +29,15 @@ func DisableCoverageCounting() {
 
 func ClearCounters() {
 	entryMapMu.Lock()
-	gMapMu.Lock()
 	chanGIDMapMu.Lock()
+	gMapMu.Lock()
 
 	entryMap = make(map[string]*TraceEntry)
 	gMap = make(map[uint64]*TraceG)
 	chanGIDMap = make(map[uintptr]*chanLinks)
 
-	chanGIDMapMu.Unlock()
 	gMapMu.Unlock()
+	chanGIDMapMu.Unlock()
 	entryMapMu.Unlock()
 }
 
@@ -514,17 +514,17 @@ func init() {
 func initMap() {
 	initOnce.Do(func() {
 		entryMapMu.Lock()
+		chanGIDMapMu.Lock()
 		gMapMu.Lock()
 		blockMapMu.Lock()
 		funcMapMu.Lock()
 		allCoverprofileMapMu.Lock()
-		chanGIDMapMu.Lock()
 		defer entryMapMu.Unlock()
+		defer chanGIDMapMu.Unlock()
 		defer gMapMu.Unlock()
 		defer blockMapMu.Unlock()
 		defer funcMapMu.Unlock()
 		defer allCoverprofileMapMu.Unlock()
-		defer chanGIDMapMu.Unlock()
 
 		entryMap = make(map[string]*TraceEntry)
 		gMap = make(map[uint64]*TraceG)
