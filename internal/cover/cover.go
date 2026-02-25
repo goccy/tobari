@@ -193,7 +193,7 @@ func createCovervars(pkgcfg *PackageConfig, pkgcfgPath string, inputFiles []stri
 package %[1]s
 
 import (
-   _ "unsafe"
+   "unsafe"
 )
 
 %[3]s
@@ -214,6 +214,39 @@ func %[2]s_AddCoverMeta(string) bool
 
 //go:linkname %[2]s_AddEmbeddedSource github.com/goccy/tobari/internal/tobari.AddEmbeddedSource
 func %[2]s_AddEmbeddedSource(string, string) bool
+
+//go:linkname %[2]s_TraceChan github.com/goccy/tobari/internal/tobari.TraceChan
+func %[2]s_TraceChan(uintptr, uint64, bool)
+
+func %[2]s_chanIDSend[T any](ch chan<- T) uintptr {
+	return *(*uintptr)(unsafe.Pointer(&ch))
+}
+
+func %[2]s_chanIDRecv[T any](ch <-chan T) uintptr {
+	return *(*uintptr)(unsafe.Pointer(&ch))
+}
+
+func %[2]s_afterRecvChan[T any](ch <-chan T) <-chan T {
+	%[2]s_TraceChan(%[2]s_chanIDRecv(ch), %[2]s_GID(), false)
+	return ch
+}
+
+func %[2]s_sendChan[T any](ch chan<- T) chan<- T {
+	%[2]s_TraceChan(%[2]s_chanIDSend(ch), %[2]s_GID(), true)
+	return ch
+}
+
+func %[2]s_selectRecv[T any](ch <-chan T, token *uintptr) <-chan T {
+	*token = %[2]s_chanIDRecv(ch)
+	return ch
+}
+
+func %[2]s_selectSend[T any](ch chan<- T, token *uintptr) chan<- T {
+	*token = %[2]s_chanIDSend(ch)
+	return ch
+}
+
+var _ = unsafe.Pointer(nil)
 
 var _ = %[2]s_SetGIDFunc(func() uint64 { return %[2]s_GID() })
 var _ = func() bool {
@@ -334,6 +367,9 @@ type File struct {
 	funcDep             *FunctionDependency
 	pkgcfg              *PackageConfig
 	anonymGlobalFuncIdx int
+	commClauseCommPos   map[token.Pos]struct{} // positions of CommClause.Comm send/recv to skip wrapping
+	selectInstrumented  map[token.Pos]struct{}
+	selectTokenIdx      int
 }
 
 func (f *File) nextBlockIndex() int {
@@ -381,6 +417,9 @@ func addTracePointWithContent(pkgcfg *PackageConfig, dep *FunctionDependency, fi
 		funcDep:             dep,
 		pkgcfg:              pkgcfg,
 		anonymGlobalFuncIdx: 1,
+		commClauseCommPos:   collectCommClauseCommPos(parsedFile),
+		selectInstrumented:  make(map[token.Pos]struct{}),
+		selectTokenIdx:      1,
 	}
 
 	// Walk the AST and instrument code
@@ -410,21 +449,20 @@ var _ = %s_AddCoverMeta(%q)
 func (f *File) renderMetadata() (string, error) {
 	funcs := make([]*tobari.Function, 0, len(f.funcs))
 	for _, fn := range f.funcs {
-		// When "-mod testmain" is specified, funcDep becomes nil, so the process is skipped.
+		// When "-mode testmain" is specified, funcDep becomes nil, so the process is skipped.
 		if f.funcDep == nil {
 			continue
 		}
-		fqdn := f.normalizeFunctionFQDN(fn.name, f.funcDep.PkgPath)
-		depNames := make([]string, 0, len(f.funcDep.DepMap))
-		for name := range f.funcDep.DepMap {
-			depNames = append(depNames, name)
-		}
-		deps, exists := f.funcDep.DepMap[fqdn]
+		deps, exists := f.funcDep.DepMap[fn.name]
 		if !exists {
-			return "", fmt.Errorf("failed to find function dependencies %s from %v", fqdn, depNames)
+			depNames := make([]string, 0, len(f.funcDep.DepMap))
+			for name := range f.funcDep.DepMap {
+				depNames = append(depNames, name)
+			}
+			return "", fmt.Errorf("failed to find function dependencies %s from %v", fn.name, depNames)
 		}
 		funcs = append(funcs, &tobari.Function{
-			Name:   fqdn,
+			Name:   fn.name,
 			Blocks: fn.blocks,
 			Deps:   deps,
 		})
@@ -440,21 +478,6 @@ func (f *File) renderMetadata() (string, error) {
 		return "", fmt.Errorf("failed to encode tobari's metadata: %w", err)
 	}
 	return string(b), nil
-}
-
-func (f *File) normalizeFunctionFQDN(fname, pkgPath string) string {
-	parts := strings.Split(fname, ".")
-
-	if len(parts) == 1 {
-		return fmt.Sprintf("%s.%s", f.funcDep.PkgPath, fname)
-	}
-
-	// method definition.
-	if strings.HasPrefix(parts[0], "*") {
-		// pointer receiver.
-		return fmt.Sprintf("(*%s.%s).%s", pkgPath, parts[0][1:], parts[1])
-	}
-	return fmt.Sprintf("(%s.%s).%s", pkgPath, parts[0], parts[1])
 }
 
 func (f *File) offset(pos token.Pos) int {
@@ -534,6 +557,17 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 		if n.Body == nil || len(n.Body.List) == 0 {
 			return nil
 		}
+		if f.funcDep != nil {
+			if _, ok := f.selectInstrumented[n.Pos()]; !ok {
+				f.instrumentSelect(n, n.Pos())
+			}
+		}
+	case *ast.LabeledStmt:
+		if sel, ok := n.Stmt.(*ast.SelectStmt); ok && f.funcDep != nil {
+			if _, ok := f.selectInstrumented[sel.Pos()]; !ok {
+				f.instrumentSelect(sel, n.Pos())
+			}
+		}
 	case *ast.SwitchStmt:
 		// Don't annotate an empty switch - creates a syntax error.
 		if n.Body == nil || len(n.Body.List) == 0 {
@@ -559,17 +593,13 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 		if n.Name.Name == "_" || n.Body == nil {
 			return nil
 		}
-		// Determine proper function or method name.
 		fname := n.Name.Name
-		if r := n.Recv; r != nil && len(r.List) == 1 {
-			t := r.List[0].Type
-			star := ""
-			if p, _ := t.(*ast.StarExpr); p != nil {
-				t = p.X
-				star = "*"
-			}
-			if p, _ := t.(*ast.Ident); p != nil {
-				fname = star + p.Name + "." + fname
+		if f.funcDep != nil && len(f.funcDep.FuncNames) != 0 {
+			// SSA's Function.Pos() returns FuncDecl.Name position (not the func keyword).
+			pos := f.fset.Position(n.Name.Pos())
+			key := funcPos{Filename: filepath.Clean(pos.Filename), Offset: pos.Offset}
+			if fqdn, ok := f.funcDep.FuncNames[key]; ok {
+				fname = fqdn
 			}
 		}
 		parent := f.curFunc
@@ -581,13 +611,52 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 		return nil
 	case *ast.FuncLit:
 		parent := f.curFunc
-		fname := f.createAnonymFuncName(parent)
+		var fname string
+		if f.funcDep != nil && len(f.funcDep.FuncNames) != 0 {
+			pos := f.fset.Position(n.Pos())
+			key := funcPos{Filename: filepath.Clean(pos.Filename), Offset: pos.Offset}
+			fname = f.funcDep.FuncNames[key]
+		}
+		if fname == "" {
+			fname = f.createAnonymFuncName(parent)
+		}
 		fn := newFunction(fname)
 		f.curFunc = fn
 		f.funcs = append(f.funcs, fn)
 		ast.Walk(f, n.Body)
 		f.curFunc = parent
 		return nil
+	case *ast.SendStmt:
+		// ch <- value → _tobari_sendChan(ch) <- value
+		if f.funcDep != nil {
+			if _, skip := f.commClauseCommPos[n.Pos()]; skip {
+				return f
+			}
+			f.edit.Insert(f.offset(n.Chan.Pos()),
+				fmt.Sprintf("%s_sendChan(", tobariPkg))
+			f.edit.Insert(f.offset(n.Chan.End()), ")")
+		}
+	case *ast.UnaryExpr:
+		// <-ch → <-_tobari_afterRecvChan(ch)
+		if n.Op == token.ARROW && f.funcDep != nil {
+			if _, skip := f.commClauseCommPos[n.Pos()]; skip {
+				return f
+			}
+			f.edit.Insert(f.offset(n.X.Pos()),
+				fmt.Sprintf("%s_afterRecvChan(", tobariPkg))
+			f.edit.Insert(f.offset(n.X.End()), ")")
+		}
+	case *ast.RangeStmt:
+		// for v := range ch { → for v := range _tobari_afterRecvChan(ch) {
+		if f.funcDep != nil && f.funcDep.ChanRanges != nil {
+			pos := f.fset.Position(n.X.Pos())
+			key := funcPos{Filename: filepath.Clean(pos.Filename), Offset: pos.Offset}
+			if _, ok := f.funcDep.ChanRanges[key]; ok {
+				f.edit.Insert(f.offset(n.X.Pos()),
+					fmt.Sprintf("%s_afterRecvChan(", tobariPkg))
+				f.edit.Insert(f.offset(n.X.End()), ")")
+			}
+		}
 	}
 	return f
 }
@@ -597,15 +666,132 @@ func (f *File) createAnonymFuncName(fn *Function) string {
 		defer func() { f.anonymGlobalFuncIdx++ }()
 		return fmt.Sprintf("init$%d", f.anonymGlobalFuncIdx)
 	}
-
 	defer func() { fn.anonymFuncIdx++ }()
-	if fn.name == "init" {
-		// TODO: It is not possible to determine how many other init functions are defined from the information in the current file,
-		// so it is always counted as #1.
-		// This logic will cause issues if there are multiple init functions.
-		return fmt.Sprintf("init#1$%d", fn.anonymFuncIdx)
-	}
 	return fmt.Sprintf("%s$%d", fn.name, fn.anonymFuncIdx)
+}
+
+func (f *File) nextSelectToken() string {
+	defer func() { f.selectTokenIdx++ }()
+	return fmt.Sprintf("__tobari_select_id%d", f.selectTokenIdx)
+}
+
+func (f *File) instrumentSelect(n *ast.SelectStmt, insertPos token.Pos) {
+	if n.Body == nil || len(n.Body.List) == 0 {
+		return
+	}
+	f.selectInstrumented[n.Pos()] = struct{}{}
+
+	type caseInfo struct {
+		token  string
+		isSend bool
+		expr   ast.Expr
+		clause *ast.CommClause
+	}
+	var cases []caseInfo
+
+	for _, stmt := range n.Body.List {
+		clause := stmt.(*ast.CommClause)
+		if clause.Comm == nil {
+			continue
+		}
+		expr, isSend := selectCaseChannelExpr(clause.Comm)
+		if expr == nil {
+			continue
+		}
+		cases = append(cases, caseInfo{
+			token:  f.nextSelectToken(),
+			isSend: isSend,
+			expr:   expr,
+			clause: clause,
+		})
+	}
+
+	if len(cases) == 0 {
+		return
+	}
+
+	// Insert token variables before the select statement in source order.
+	for i := 0; i < len(cases); i++ {
+		c := cases[i]
+		f.edit.Insert(f.offset(insertPos), fmt.Sprintf("var %s uintptr;", c.token))
+	}
+
+	// Wrap channel expressions in select cases to record chanID, then trace only when selected.
+	for _, c := range cases {
+		if c.isSend {
+			f.edit.Insert(f.offset(c.expr.Pos()),
+				fmt.Sprintf("%s_selectSend(", tobariPkg))
+			f.edit.Insert(f.offset(c.expr.End()),
+				fmt.Sprintf(",&%s)", c.token))
+			f.edit.Insert(f.offset(c.clause.Colon)+1,
+				fmt.Sprintf("%s_TraceChan(%s,%s_GID(),true);", tobariPkg, c.token, tobariPkg))
+		} else {
+			f.edit.Insert(f.offset(c.expr.Pos()),
+				fmt.Sprintf("%s_selectRecv(", tobariPkg))
+			f.edit.Insert(f.offset(c.expr.End()),
+				fmt.Sprintf(",&%s)", c.token))
+			f.edit.Insert(f.offset(c.clause.Colon)+1,
+				fmt.Sprintf("%s_TraceChan(%s,%s_GID(),false);", tobariPkg, c.token, tobariPkg))
+		}
+	}
+}
+
+func selectCaseChannelExpr(comm ast.Stmt) (ast.Expr, bool) {
+	if comm == nil {
+		return nil, false
+	}
+	switch s := comm.(type) {
+	case *ast.SendStmt:
+		return s.Chan, true
+	case *ast.ExprStmt:
+		if unary, ok := s.X.(*ast.UnaryExpr); ok && unary.Op == token.ARROW {
+			return unary.X, false
+		}
+	case *ast.AssignStmt:
+		for _, rhs := range s.Rhs {
+			if unary, ok := rhs.(*ast.UnaryExpr); ok && unary.Op == token.ARROW {
+				return unary.X, false
+			}
+		}
+	}
+	return nil, false
+}
+
+// collectCommClauseCommPos pre-scans the AST to find all send/recv expressions
+// inside CommClause.Comm (select case statements). These positions are used to
+// skip wrapping so we can trace only selected cases.
+func collectCommClauseCommPos(file *ast.File) map[token.Pos]struct{} {
+	pos := make(map[token.Pos]struct{})
+	ast.Inspect(file, func(n ast.Node) bool {
+		cc, ok := n.(*ast.CommClause)
+		if !ok {
+			return true
+		}
+		if cc.Comm == nil {
+			return true
+		}
+		// Collect only the select's channel operation position, not nested receives.
+		switch s := cc.Comm.(type) {
+		case *ast.SendStmt:
+			// Skip wrapping for the select's send itself.
+			pos[s.Pos()] = struct{}{}
+		case *ast.ExprStmt:
+			if ue, ok := s.X.(*ast.UnaryExpr); ok && ue.Op == token.ARROW {
+				// Skip wrapping for the select's top-level receive.
+				pos[ue.Pos()] = struct{}{}
+			}
+		case *ast.AssignStmt:
+			for _, rhs := range s.Rhs {
+				if ue, ok := rhs.(*ast.UnaryExpr); ok && ue.Op == token.ARROW {
+					// Skip wrapping for the select's top-level receive.
+					pos[ue.Pos()] = struct{}{}
+					break
+				}
+			}
+		}
+		return true
+	})
+	return pos
 }
 
 // findText finds text in the original source, starting at pos.
@@ -896,6 +1082,7 @@ type edit struct {
 	start   int
 	end     int
 	newText string
+	seq     int
 }
 
 // NewBuffer creates a new edit buffer
@@ -912,6 +1099,7 @@ func (b *Buffer) Insert(offset int, text string) {
 		start:   offset,
 		end:     offset,
 		newText: text,
+		seq:     len(b.edits),
 	})
 }
 
@@ -921,6 +1109,7 @@ func (b *Buffer) Replace(start, end int, newText string) {
 		start:   start,
 		end:     end,
 		newText: newText,
+		seq:     len(b.edits),
 	})
 }
 
@@ -930,9 +1119,14 @@ func (b *Buffer) Bytes() []byte {
 		return b.original
 	}
 
-	// Sort edits by start position (reverse order for correct application)
-	sort.Slice(b.edits, func(i, j int) bool {
-		return b.edits[i].start > b.edits[j].start
+	// Sort edits by start position (reverse order for correct application).
+	// For same-position inserts, later-added edits (higher seq) come first
+	// so they are applied first and end up closer to the original code.
+	sort.SliceStable(b.edits, func(i, j int) bool {
+		if b.edits[i].start != b.edits[j].start {
+			return b.edits[i].start > b.edits[j].start
+		}
+		return b.edits[i].seq > b.edits[j].seq
 	})
 
 	result := make([]byte, len(b.original))

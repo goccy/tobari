@@ -188,6 +188,12 @@ func TestCacheBehavior(t *testing.T) {
 			runDir:   "testdata/toolchain",
 			hasTest:  true,
 		},
+		{
+			name:     "channel",
+			flagsDir: "testdata/channel",
+			runDir:   "testdata/channel",
+			hasTest:  true,
+		},
 	}
 
 	goFlagsEnv := func(tobariFlags []string) []string {

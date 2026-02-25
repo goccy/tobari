@@ -29,12 +29,15 @@ func DisableCoverageCounting() {
 
 func ClearCounters() {
 	entryMapMu.Lock()
+	chanGIDMapMu.Lock()
 	gMapMu.Lock()
 
 	entryMap = make(map[string]*TraceEntry)
 	gMap = make(map[uint64]*TraceG)
+	chanGIDMap = make(map[uintptr]*chanLinks)
 
 	gMapMu.Unlock()
+	chanGIDMapMu.Unlock()
 	entryMapMu.Unlock()
 }
 
@@ -107,7 +110,7 @@ func WriteAllCoverprofile(mode string, w io.Writer) {
 
 	blockToCountMap := make(map[string]int)
 	for _, g := range gMap {
-		g.blockToCountMap(blockToCountMap)
+		g.blockToCountMap(blockToCountMap, make(map[uint64]struct{}))
 	}
 
 	newCoverprofileMap := make(map[string]*CoverEntry)
@@ -182,7 +185,7 @@ func (e *CoverEntry) String() string {
 func (e *TraceEntry) CoverprofileMap() map[string]*CoverEntry {
 	blockToCountMap := make(map[string]int)
 	for _, root := range e.Roots {
-		root.blockToCountMap(blockToCountMap)
+		root.blockToCountMap(blockToCountMap, make(map[uint64]struct{}))
 	}
 
 	newCoverprofileMap := make(map[string]*CoverEntry)
@@ -282,15 +285,20 @@ func (g *TraceG) linkG(child *TraceG) {
 	g.Children = append(g.Children, child)
 }
 
-func (g *TraceG) blockToCountMap(blockToCountMap map[string]int) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+func (g *TraceG) blockToCountMap(blockToCountMap map[string]int, visited map[uint64]struct{}) {
+	if _, ok := visited[g.ID]; ok {
+		return
+	}
+	visited[g.ID] = struct{}{}
+
+	g.mu.RLock()
+	defer g.mu.RUnlock()
 
 	for blockID, count := range g.BlockCounterMap {
 		blockToCountMap[blockID] += count
 	}
 	for _, child := range g.Children {
-		child.blockToCountMap(blockToCountMap)
+		child.blockToCountMap(blockToCountMap, visited)
 	}
 }
 
@@ -313,7 +321,14 @@ var (
 	allCoverprofileMap     map[string]*CoverEntry
 	allCoverprofileMapKeys []string
 	allCoverprofileMapMu   sync.RWMutex
+	chanGIDMap             map[uintptr]*chanLinks
+	chanGIDMapMu           sync.Mutex
 )
+
+type chanLinks struct {
+	senders   map[uint64]struct{}
+	receivers map[uint64]struct{}
+}
 
 func SetGIDFunc(fn func() uint64) bool {
 	gidFnOnce.Do(func() {
@@ -346,6 +361,102 @@ func getBlock(blockID string) *Block {
 	defer blockMapMu.RUnlock()
 
 	return blockMap[blockID]
+}
+
+// TraceChan records a channel operation for cross-goroutine coverage linking.
+// chanID is the hchan pointer (extracted via unsafe at the call site).
+// When isSend is true, the goroutine is registered as a sender on the channel.
+// When isSend is false (receive), the receiver is linked as a child of all senders.
+func TraceChan(chanID uintptr, gid uint64, isSend bool) {
+	isEnabledTraceMu.RLock()
+	if !isEnabledTrace {
+		isEnabledTraceMu.RUnlock()
+		return
+	}
+	isEnabledTraceMu.RUnlock()
+
+	if chanID == 0 {
+		return
+	}
+
+	var peers []uint64
+	if isSend {
+		chanGIDMapMu.Lock()
+		links := chanGIDMap[chanID]
+		if links == nil {
+			links = &chanLinks{
+				senders:   make(map[uint64]struct{}),
+				receivers: make(map[uint64]struct{}),
+			}
+			chanGIDMap[chanID] = links
+		}
+		for recvGID := range links.receivers {
+			if recvGID != gid {
+				peers = append(peers, recvGID)
+			}
+		}
+		links.senders[gid] = struct{}{}
+		chanGIDMapMu.Unlock()
+
+		// Link sender as parent of all known receivers.
+		if len(peers) == 0 {
+			return
+		}
+		gMapMu.Lock()
+		sendG := gMap[gid]
+		if sendG == nil {
+			sendG = newTraceG(gid)
+			gMap[gid] = sendG
+		}
+		for _, recvGID := range peers {
+			recvG := gMap[recvGID]
+			if recvG == nil {
+				recvG = newTraceG(recvGID)
+				gMap[recvGID] = recvG
+			}
+			sendG.linkG(recvG)
+		}
+		gMapMu.Unlock()
+		return
+	}
+
+	// Receive: snapshot senders, then link under gMapMu to avoid lock ordering issues.
+	chanGIDMapMu.Lock()
+	links := chanGIDMap[chanID]
+	if links == nil {
+		links = &chanLinks{
+			senders:   make(map[uint64]struct{}),
+			receivers: make(map[uint64]struct{}),
+		}
+		chanGIDMap[chanID] = links
+	}
+	for sendGID := range links.senders {
+		if sendGID != gid {
+			peers = append(peers, sendGID)
+		}
+	}
+	links.receivers[gid] = struct{}{}
+	chanGIDMapMu.Unlock()
+
+	// Link this receiver as child of all known senders.
+	if len(peers) == 0 {
+		return
+	}
+	gMapMu.Lock()
+	recvG := gMap[gid]
+	if recvG == nil {
+		recvG = newTraceG(gid)
+		gMap[gid] = recvG
+	}
+	for _, sendGID := range peers {
+		sendG := gMap[sendGID]
+		if sendG == nil {
+			sendG = newTraceG(sendGID)
+			gMap[sendGID] = sendG
+		}
+		sendG.linkG(recvG)
+	}
+	gMapMu.Unlock()
 }
 
 func Trace(fileName string, pgid, gid uint64, blockIdx, startLine, endLine, startCol, endCol, numStmts int) {
@@ -403,11 +514,13 @@ func init() {
 func initMap() {
 	initOnce.Do(func() {
 		entryMapMu.Lock()
+		chanGIDMapMu.Lock()
 		gMapMu.Lock()
 		blockMapMu.Lock()
 		funcMapMu.Lock()
 		allCoverprofileMapMu.Lock()
 		defer entryMapMu.Unlock()
+		defer chanGIDMapMu.Unlock()
 		defer gMapMu.Unlock()
 		defer blockMapMu.Unlock()
 		defer funcMapMu.Unlock()
@@ -418,6 +531,7 @@ func initMap() {
 		blockMap = make(map[string]*Block)
 		funcMap = make(map[string]*Function)
 		allCoverprofileMap = make(map[string]*CoverEntry)
+		chanGIDMap = make(map[uintptr]*chanLinks)
 	})
 }
 
@@ -714,7 +828,7 @@ func EncodeCounters() ([]byte, error) {
 
 	blockToCountMap := make(map[string]int)
 	for _, g := range gMap {
-		g.blockToCountMap(blockToCountMap)
+		g.blockToCountMap(blockToCountMap, make(map[uint64]struct{}))
 	}
 
 	var allFnCounters []CoverageFuncCounter

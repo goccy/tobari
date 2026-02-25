@@ -3,6 +3,8 @@ package cover
 import (
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/types"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,32 +18,79 @@ import (
 	"golang.org/x/tools/go/ssa/ssautil"
 )
 
+// funcPos identifies a function by its source position (file + byte offset).
+type funcPos struct {
+	Filename string
+	Offset   int
+}
+
 type FunctionDependency struct {
 	PkgPath string
 	DepMap  map[string][]string
+	// FuncNames maps source position → SSA FQDN for all functions in the target package.
+	FuncNames map[funcPos]string
+	// ChanRanges holds positions of range expressions over channels (for v := range ch).
+	ChanRanges map[funcPos]struct{}
 }
 
 func createFunctionDependencyMap(pkgcfg *PackageConfig, path string) (*FunctionDependency, error) {
-	prog, targetPkg, err := getSSAProgram(pkgcfg, path)
+	prog, targetPkg, loadedPkgs, err := getSSAProgram(pkgcfg, path)
 	if err != nil {
 		return nil, err
 	}
 
 	graph := vta.CallGraph(ssautil.AllFunctions(prog), cha.CallGraph(prog))
 	depMap := make(map[string][]string)
+	funcNames := make(map[funcPos]string)
 	for _, n := range graph.Nodes {
 		if n.Func == nil || n.Func.Pkg != targetPkg {
 			continue
 		}
 		depMap[n.Func.String()] = analyzeFuncDeps(targetPkg, n)
+		if n.Func.Pos().IsValid() {
+			pos := prog.Fset.Position(n.Func.Pos())
+			funcNames[funcPos{
+				Filename: filepath.Clean(pos.Filename),
+				Offset:   pos.Offset,
+			}] = n.Func.String()
+		}
 	}
+
+	// Detect range-over-channel expressions using type info.
+	chanRanges := make(map[funcPos]struct{})
+	for _, pkg := range loadedPkgs {
+		if pkg.PkgPath != targetPkg.Pkg.Path() {
+			continue
+		}
+		for _, file := range pkg.Syntax {
+			ast.Inspect(file, func(n ast.Node) bool {
+				rs, ok := n.(*ast.RangeStmt)
+				if !ok {
+					return true
+				}
+				if t := pkg.TypesInfo.TypeOf(rs.X); t != nil {
+					if _, ok := t.Underlying().(*types.Chan); ok {
+						pos := prog.Fset.Position(rs.X.Pos())
+						chanRanges[funcPos{
+							Filename: filepath.Clean(pos.Filename),
+							Offset:   pos.Offset,
+						}] = struct{}{}
+					}
+				}
+				return true
+			})
+		}
+	}
+
 	return &FunctionDependency{
-		PkgPath: targetPkg.Pkg.Path(),
-		DepMap:  depMap,
+		PkgPath:    targetPkg.Pkg.Path(),
+		DepMap:     depMap,
+		FuncNames:  funcNames,
+		ChanRanges: chanRanges,
 	}, nil
 }
 
-func getSSAProgram(pkgcfg *PackageConfig, path string) (*ssa.Program, *ssa.Package, error) {
+func getSSAProgram(pkgcfg *PackageConfig, path string) (*ssa.Program, *ssa.Package, []*packages.Package, error) {
 	// Since the results of the `tobari flags` are included in GOFLAGS,
 	// this would result in infinite recursion as is.
 	// Therefore, GOFLAGS is removed from the environment variables.
@@ -66,7 +115,7 @@ func getSSAProgram(pkgcfg *PackageConfig, path string) (*ssa.Program, *ssa.Packa
 
 	pkgs, err := packages.Load(cfg, ".")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var pkgErrs []error
 	for _, pkg := range pkgs {
@@ -75,7 +124,7 @@ func getSSAProgram(pkgcfg *PackageConfig, path string) (*ssa.Program, *ssa.Packa
 		}
 	}
 	if len(pkgErrs) != 0 {
-		return nil, nil, errors.Join(pkgErrs...)
+		return nil, nil, nil, errors.Join(pkgErrs...)
 	}
 
 	prog, ssaPkgs := ssautil.AllPackages(pkgs, 0)
@@ -91,12 +140,12 @@ func getSSAProgram(pkgcfg *PackageConfig, path string) (*ssa.Program, *ssa.Packa
 		}
 	}
 	if targetPkg == nil {
-		return nil, nil, fmt.Errorf("failed to find target package: %s", pkgcfg.PkgName)
+		return nil, nil, nil, fmt.Errorf("failed to find target package: %s", pkgcfg.PkgName)
 	}
 
 	prog.Build()
 
-	return prog, targetPkg, nil
+	return prog, targetPkg, pkgs, nil
 }
 
 func analyzeFuncDeps(targetPkg *ssa.Package, n *callgraph.Node) []string {
