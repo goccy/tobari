@@ -770,16 +770,25 @@ func collectCommClauseCommPos(file *ast.File) map[token.Pos]struct{} {
 		if cc.Comm == nil {
 			return true
 		}
-		// Collect send and receive positions inside Comm
-		ast.Inspect(cc.Comm, func(inner ast.Node) bool {
-			if ss, ok := inner.(*ast.SendStmt); ok {
-				pos[ss.Pos()] = struct{}{}
-			}
-			if ue, ok := inner.(*ast.UnaryExpr); ok && ue.Op == token.ARROW {
+		// Collect only the select's channel operation position, not nested receives.
+		switch s := cc.Comm.(type) {
+		case *ast.SendStmt:
+			// Skip wrapping for the select's send itself.
+			pos[s.Pos()] = struct{}{}
+		case *ast.ExprStmt:
+			if ue, ok := s.X.(*ast.UnaryExpr); ok && ue.Op == token.ARROW {
+				// Skip wrapping for the select's top-level receive.
 				pos[ue.Pos()] = struct{}{}
 			}
-			return true
-		})
+		case *ast.AssignStmt:
+			for _, rhs := range s.Rhs {
+				if ue, ok := rhs.(*ast.UnaryExpr); ok && ue.Op == token.ARROW {
+					// Skip wrapping for the select's top-level receive.
+					pos[ue.Pos()] = struct{}{}
+					break
+				}
+			}
+		}
 		return true
 	})
 	return pos
