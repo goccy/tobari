@@ -218,18 +218,22 @@ func %[2]s_AddEmbeddedSource(string, string) bool
 //go:linkname %[2]s_TraceChan github.com/goccy/tobari/internal/tobari.TraceChan
 func %[2]s_TraceChan(uintptr, uint64, bool)
 
-func %[2]s_chanID(ch any) uintptr {
-	return (*[2]uintptr)(unsafe.Pointer(&ch))[1]
+func %[2]s_chanIDSend[T any](ch chan<- T) uintptr {
+	return *(*uintptr)(unsafe.Pointer(&ch))
 }
 
-func %[2]s_afterRecv[T any](chanID uintptr, v T) T {
-	%[2]s_TraceChan(chanID, %[2]s_GID(), false)
-	return v
+func %[2]s_chanIDRecv[T any](ch <-chan T) uintptr {
+	return *(*uintptr)(unsafe.Pointer(&ch))
 }
 
-func %[2]s_beforeSend[T any](chanID uintptr, v T) T {
-	%[2]s_TraceChan(chanID, %[2]s_GID(), true)
-	return v
+func %[2]s_afterRecvChan[T any](ch <-chan T) <-chan T {
+	%[2]s_TraceChan(%[2]s_chanIDRecv(ch), %[2]s_GID(), false)
+	return ch
+}
+
+func %[2]s_sendChan[T any](ch chan<- T) chan<- T {
+	%[2]s_TraceChan(%[2]s_chanIDSend(ch), %[2]s_GID(), true)
+	return ch
 }
 
 var _ = unsafe.Pointer(nil)
@@ -353,7 +357,6 @@ type File struct {
 	funcDep             *FunctionDependency
 	pkgcfg              *PackageConfig
 	anonymGlobalFuncIdx int
-	commClauseRecvPos   map[token.Pos]struct{} // positions of <-ch inside CommClause.Comm to skip wrapping
 }
 
 func (f *File) nextBlockIndex() int {
@@ -401,7 +404,6 @@ func addTracePointWithContent(pkgcfg *PackageConfig, dep *FunctionDependency, fi
 		funcDep:             dep,
 		pkgcfg:              pkgcfg,
 		anonymGlobalFuncIdx: 1,
-		commClauseRecvPos:   collectCommClauseRecvPos(parsedFile),
 	}
 
 	// Walk the AST and instrument code
@@ -478,24 +480,12 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 					f.addCounters(clause.Colon+1, clause.Colon+1, clause.End(), clause.Body, false)
 				}
 				return f
-			case *ast.CommClause: // select
-				for _, stmt := range n.List {
-					clause := stmt.(*ast.CommClause)
-					if f.funcDep != nil {
-						if chSrc, isSend := f.channelExprFromComm(clause.Comm); chSrc != "" {
-							if isSend {
-								// Send in select: wrap value expression via SendStmt case
-								// (handled when the walk visits the SendStmt inside Comm)
-							} else {
-								// Receive in select: insert TraceChan at case body start
-								f.edit.Insert(f.offset(clause.Colon)+1,
-									fmt.Sprintf("%s_TraceChan(%s_chanID(%s),%s_GID(),false);", tobariPkg, tobariPkg, chSrc, tobariPkg))
-							}
-						}
+				case *ast.CommClause: // select
+					for _, stmt := range n.List {
+						clause := stmt.(*ast.CommClause)
+						f.addCounters(clause.Colon+1, clause.Colon+1, clause.End(), clause.Body, false)
 					}
-					f.addCounters(clause.Colon+1, clause.Colon+1, clause.End(), clause.Body, false)
-				}
-				return f
+					return f
 			}
 		}
 		f.addCounters(n.Lbrace, n.Lbrace+1, n.Rbrace+1, n.List, true)
@@ -610,32 +600,28 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 		f.curFunc = parent
 		return nil
 	case *ast.SendStmt:
-		// ch <- value → ch <- _tobari_beforeSend(chanID, value)
+		// ch <- value → _tobari_sendChan(ch) <- value
 		if f.funcDep != nil {
-			chSrc := string(f.content[f.offset(n.Chan.Pos()):f.offset(n.Chan.End())])
-			f.edit.Insert(f.offset(n.Value.Pos()),
-				fmt.Sprintf("%s_beforeSend(%s_chanID(%s),", tobariPkg, tobariPkg, chSrc))
-			f.edit.Insert(f.offset(n.Value.End()), ")")
+			f.edit.Insert(f.offset(n.Chan.Pos()),
+				fmt.Sprintf("%s_sendChan(", tobariPkg))
+			f.edit.Insert(f.offset(n.Chan.End()), ")")
 		}
 	case *ast.UnaryExpr:
-		// <-ch → _tobari_afterRecv(chanID, <-ch)
+		// <-ch → <-_tobari_afterRecvChan(ch)
 		if n.Op == token.ARROW && f.funcDep != nil {
-			if _, skip := f.commClauseRecvPos[n.Pos()]; !skip {
-				chSrc := string(f.content[f.offset(n.X.Pos()):f.offset(n.X.End())])
-				f.edit.Insert(f.offset(n.Pos()),
-					fmt.Sprintf("%s_afterRecv(%s_chanID(%s),", tobariPkg, tobariPkg, chSrc))
-				f.edit.Insert(f.offset(n.End()), ")")
-			}
+			f.edit.Insert(f.offset(n.X.Pos()),
+				fmt.Sprintf("%s_afterRecvChan(", tobariPkg))
+			f.edit.Insert(f.offset(n.X.End()), ")")
 		}
 	case *ast.RangeStmt:
-		// for v := range ch { → insert TraceChan at loop body start
+		// for v := range ch { → for v := range _tobari_afterRecvChan(ch) {
 		if f.funcDep != nil && f.funcDep.ChanRanges != nil {
 			pos := f.fset.Position(n.X.Pos())
 			key := funcPos{Filename: filepath.Clean(pos.Filename), Offset: pos.Offset}
 			if _, ok := f.funcDep.ChanRanges[key]; ok {
-				chSrc := string(f.content[f.offset(n.X.Pos()):f.offset(n.X.End())])
-				f.edit.Insert(f.offset(n.Body.Lbrace)+1,
-					fmt.Sprintf("%s_TraceChan(%s_chanID(%s),%s_GID(),false);", tobariPkg, tobariPkg, chSrc, tobariPkg))
+				f.edit.Insert(f.offset(n.X.Pos()),
+					fmt.Sprintf("%s_afterRecvChan(", tobariPkg))
+				f.edit.Insert(f.offset(n.X.End()), ")")
 			}
 		}
 	}
@@ -654,51 +640,6 @@ func (f *File) createAnonymFuncName(fn *Function) string {
 // collectCommClauseRecvPos pre-scans the AST to find all receive expressions
 // inside CommClause.Comm (select case statements). These positions are used to
 // skip wrapping with afterRecv, since select case syntax does not allow it.
-func collectCommClauseRecvPos(file *ast.File) map[token.Pos]struct{} {
-	pos := make(map[token.Pos]struct{})
-	ast.Inspect(file, func(n ast.Node) bool {
-		cc, ok := n.(*ast.CommClause)
-		if !ok {
-			return true
-		}
-		if cc.Comm == nil {
-			return true
-		}
-		// Collect all receive UnaryExpr positions inside Comm
-		ast.Inspect(cc.Comm, func(inner ast.Node) bool {
-			if ue, ok := inner.(*ast.UnaryExpr); ok && ue.Op == token.ARROW {
-				pos[ue.Pos()] = struct{}{}
-			}
-			return true
-		})
-		return true
-	})
-	return pos
-}
-
-// channelExprFromComm extracts the channel source expression and whether it's a
-// send operation from a CommClause's Comm statement.
-func (f *File) channelExprFromComm(comm ast.Stmt) (string, bool) {
-	if comm == nil {
-		return "", false
-	}
-	switch s := comm.(type) {
-	case *ast.SendStmt:
-		return string(f.content[f.offset(s.Chan.Pos()):f.offset(s.Chan.End())]), true
-	case *ast.ExprStmt:
-		if unary, ok := s.X.(*ast.UnaryExpr); ok && unary.Op == token.ARROW {
-			return string(f.content[f.offset(unary.X.Pos()):f.offset(unary.X.End())]), false
-		}
-	case *ast.AssignStmt:
-		for _, rhs := range s.Rhs {
-			if unary, ok := rhs.(*ast.UnaryExpr); ok && unary.Op == token.ARROW {
-				return string(f.content[f.offset(unary.X.Pos()):f.offset(unary.X.End())]), false
-			}
-		}
-	}
-	return "", false
-}
-
 // findText finds text in the original source, starting at pos.
 // It correctly skips over comments and assumes it need not
 // handle quoted strings.

@@ -34,7 +34,7 @@ func ClearCounters() {
 
 	entryMap = make(map[string]*TraceEntry)
 	gMap = make(map[uint64]*TraceG)
-	chanGIDMap = make(map[uintptr][]uint64)
+	chanGIDMap = make(map[uintptr]*chanLinks)
 
 	chanGIDMapMu.Unlock()
 	gMapMu.Unlock()
@@ -321,9 +321,14 @@ var (
 	allCoverprofileMap     map[string]*CoverEntry
 	allCoverprofileMapKeys []string
 	allCoverprofileMapMu   sync.RWMutex
-	chanGIDMap             map[uintptr][]uint64 // channelID → sender GIDs
+	chanGIDMap             map[uintptr]*chanLinks
 	chanGIDMapMu           sync.Mutex
 )
+
+type chanLinks struct {
+	senders   map[uint64]struct{}
+	receivers map[uint64]struct{}
+}
 
 func SetGIDFunc(fn func() uint64) bool {
 	gidFnOnce.Do(func() {
@@ -374,34 +379,82 @@ func TraceChan(chanID uintptr, gid uint64, isSend bool) {
 		return
 	}
 
-	chanGIDMapMu.Lock()
-	defer chanGIDMapMu.Unlock()
-
+	var peers []uint64
 	if isSend {
-		senders := chanGIDMap[chanID]
-		for _, s := range senders {
-			if s == gid {
-				return
+		chanGIDMapMu.Lock()
+		links := chanGIDMap[chanID]
+		if links == nil {
+			links = &chanLinks{
+				senders:   make(map[uint64]struct{}),
+				receivers: make(map[uint64]struct{}),
+			}
+			chanGIDMap[chanID] = links
+		}
+		for recvGID := range links.receivers {
+			if recvGID != gid {
+				peers = append(peers, recvGID)
 			}
 		}
-		chanGIDMap[chanID] = append(senders, gid)
+		links.senders[gid] = struct{}{}
+		chanGIDMapMu.Unlock()
+
+		// Link sender as parent of all known receivers.
+		if len(peers) == 0 {
+			return
+		}
+		gMapMu.Lock()
+		sendG := gMap[gid]
+		if sendG == nil {
+			sendG = newTraceG(gid)
+			gMap[gid] = sendG
+		}
+		for _, recvGID := range peers {
+			recvG := gMap[recvGID]
+			if recvG == nil {
+				recvG = newTraceG(recvGID)
+				gMap[recvGID] = recvG
+			}
+			sendG.linkG(recvG)
+		}
+		gMapMu.Unlock()
 		return
 	}
 
-	// Receive: link this receiver as child of all senders.
-	gMapMu.Lock()
-	g := gMap[gid]
-	if g == nil {
-		g = newTraceG(gid)
-		gMap[gid] = g
+	// Receive: snapshot senders, then link under gMapMu to avoid lock ordering issues.
+	chanGIDMapMu.Lock()
+	links := chanGIDMap[chanID]
+	if links == nil {
+		links = &chanLinks{
+			senders:   make(map[uint64]struct{}),
+			receivers: make(map[uint64]struct{}),
+		}
+		chanGIDMap[chanID] = links
 	}
-	for _, sendGID := range chanGIDMap[chanID] {
-		if sendGID == gid {
-			continue
+	for sendGID := range links.senders {
+		if sendGID != gid {
+			peers = append(peers, sendGID)
 		}
-		if sendG := gMap[sendGID]; sendG != nil {
-			sendG.linkG(g)
+	}
+	links.receivers[gid] = struct{}{}
+	chanGIDMapMu.Unlock()
+
+	// Link this receiver as child of all known senders.
+	if len(peers) == 0 {
+		return
+	}
+	gMapMu.Lock()
+	recvG := gMap[gid]
+	if recvG == nil {
+		recvG = newTraceG(gid)
+		gMap[gid] = recvG
+	}
+	for _, sendGID := range peers {
+		sendG := gMap[sendGID]
+		if sendG == nil {
+			sendG = newTraceG(sendGID)
+			gMap[sendGID] = sendG
 		}
+		sendG.linkG(recvG)
 	}
 	gMapMu.Unlock()
 }
@@ -478,7 +531,7 @@ func initMap() {
 		blockMap = make(map[string]*Block)
 		funcMap = make(map[string]*Function)
 		allCoverprofileMap = make(map[string]*CoverEntry)
-		chanGIDMap = make(map[uintptr][]uint64)
+		chanGIDMap = make(map[uintptr]*chanLinks)
 	})
 }
 
