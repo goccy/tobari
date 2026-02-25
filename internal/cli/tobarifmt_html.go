@@ -95,6 +95,10 @@ a{color:var(--accent);text-decoration:none}
 .test-actions{display:flex;gap:4px;flex-wrap:wrap}
 .test-actions button{flex:1;padding:4px 8px;font-size:11px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);cursor:pointer;color:var(--text-secondary);min-width:0}
 .test-actions button:hover{background:var(--bg-secondary)}
+.coverage-mode{display:flex;gap:12px;flex-wrap:wrap}
+.coverage-mode label{font-size:11px;color:var(--text-secondary);display:flex;align-items:center;gap:6px;cursor:pointer}
+.coverage-mode input[type="radio"]{accent-color:var(--accent)}
+.coverage-mode-desc{font-size:11px;color:var(--text-muted);line-height:1.4}
 .test-tree{flex:1;overflow-y:auto;padding:4px 0}
 .test-stats{padding:8px 12px;border-top:1px solid var(--border-light);font-size:11px;color:var(--text-secondary)}
 
@@ -105,6 +109,7 @@ a{color:var(--accent);text-decoration:none}
 .tree-toggle.has-children{cursor:pointer}
 .tree-toggle.has-children:hover{color:var(--text)}
 .tree-checkbox{margin:0 4px 0 0;cursor:pointer;accent-color:var(--accent)}
+.tree-checkbox:disabled{opacity:0.5;cursor:not-allowed}
 .tree-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .tree-children{display:none}
 .tree-node.expanded>.tree-children{display:block}
@@ -213,6 +218,11 @@ a{color:var(--accent);text-decoration:none}
           <button id="btn-select-all">Select All</button>
           <button id="btn-deselect-all">Deselect All</button>
         </div>
+        <div class="coverage-mode" id="coverage-mode">
+          <label><input type="radio" name="cov-mode" value="selected" checked> Selected tests</label>
+          <label><input type="radio" name="cov-mode" value="all"> Merge mode (all goroutines)</label>
+        </div>
+        <div class="coverage-mode-desc" id="coverage-mode-desc"></div>
       </div>
       <div class="test-tree" id="test-tree"></div>
       <div class="test-stats" id="test-stats"></div>
@@ -303,13 +313,28 @@ const state = {
   selectedTests: new Set(),
   currentFile: 0,
   compareMode: null, // null or { testA: string, testB: string }
+  coverageMode: 'selected', // 'selected' or 'all'
 };
 
-// Precompute instrumented lines per file from DATA.instrLines (includes Count=0 entries)
-const instrLineSets = {};
-if (DATA.instrLines) {
-  for (const [fi, lines] of Object.entries(DATA.instrLines)) {
-    instrLineSets[fi] = new Set(lines);
+// Precompute instrumented lines per file
+const instrLineSetsAll = {};
+if (DATA.instrLinesAll) {
+  for (const [fi, lines] of Object.entries(DATA.instrLinesAll)) {
+    instrLineSetsAll[fi] = new Set(lines);
+  }
+}
+
+const instrLineSetsScoped = {};
+if (DATA.instrLinesScoped) {
+  for (const [fi, lines] of Object.entries(DATA.instrLinesScoped)) {
+    instrLineSetsScoped[fi] = new Set(lines);
+  }
+}
+
+const allCoverageSets = {};
+if (DATA.allCoverage) {
+  for (const [fi, lines] of Object.entries(DATA.allCoverage)) {
+    allCoverageSets[fi] = new Set(lines);
   }
 }
 
@@ -327,6 +352,7 @@ if (DATA.instrLines) {
   setupOverlapFilters();
   renderSummary();
   updateHeaderBadge();
+  setupCoverageMode();
 
   document.getElementById('btn-exit-compare').addEventListener('click', exitCompareMode);
   document.getElementById('btn-prev-diff').addEventListener('click', () => navigateDiff(-1));
@@ -345,9 +371,56 @@ function setupTabs() {
   });
 }
 
+function setupCoverageMode() {
+  const container = document.getElementById('coverage-mode');
+  if (!container) return;
+  if (!DATA.allCoverage) {
+    container.style.display = 'none';
+    return;
+  }
+
+  const radios = container.querySelectorAll('input[name="cov-mode"]');
+  radios.forEach(r => {
+    r.addEventListener('change', () => {
+      if (!r.checked) return;
+      applyCoverageMode(r.value);
+    });
+  });
+
+  applyCoverageMode('selected');
+}
+
+function applyCoverageMode(mode) {
+  state.coverageMode = mode;
+  const container = document.getElementById('coverage-mode');
+  if (container) {
+    const radios = container.querySelectorAll('input[name="cov-mode"]');
+    radios.forEach(r => {
+      r.checked = (r.value === mode);
+    });
+  }
+
+  const desc = document.getElementById('coverage-mode-desc');
+  if (desc) {
+    desc.textContent = mode === 'all'
+      ? 'Merge mode: all goroutines / all instrumented blocks (equivalent to go cover). Test selection ignored.'
+      : 'Selected tests: coverage within CoverWithName scope only.';
+  }
+
+  if (mode === 'all') {
+    exitCompareMode();
+  }
+
+  updateAllCheckboxes();
+  renderSourceCode();
+  updateStats();
+  updateHeaderBadge();
+}
+
 // ========== Header Badge ==========
 function updateHeaderBadge() {
   const merged = getMergedCoverage();
+  const instrLineSets = getInstrLineSets();
   let totalInstr = 0, totalCov = 0;
   for (const [fi, instrSet] of Object.entries(instrLineSets)) {
     totalInstr += instrSet.size;
@@ -365,12 +438,14 @@ function renderTestTree() {
   renderNodes(DATA.testTree, container, 0);
 
   document.getElementById('btn-select-all').addEventListener('click', () => {
+    if (state.coverageMode === 'all') return;
     DATA.tests.forEach(t => state.selectedTests.add(t.n));
     exitCompareMode();
     updateAllCheckboxes();
     onSelectionChange();
   });
   document.getElementById('btn-deselect-all').addEventListener('click', () => {
+    if (state.coverageMode === 'all') return;
     state.selectedTests.clear();
     exitCompareMode();
     updateAllCheckboxes();
@@ -443,9 +518,13 @@ function toggleNode(node, checked) {
 }
 
 function updateAllCheckboxes() {
+  const disabled = state.coverageMode === 'all';
   document.querySelectorAll('.tree-node').forEach(div => {
     const cb = div.querySelector(':scope > .tree-label > .tree-checkbox');
-    if (cb) cb.checked = state.selectedTests.has(div.dataset.fullname);
+    if (cb) {
+      cb.checked = state.selectedTests.has(div.dataset.fullname);
+      cb.disabled = disabled;
+    }
   });
 }
 
@@ -483,10 +562,29 @@ function onSelectionChange() {
 
 // ========== Merged Coverage ==========
 function getMergedCoverage() {
+  if (state.coverageMode === 'all' && DATA.allCoverage) {
+    return allCoverageSets;
+  }
   const merged = {};
   DATA.tests.forEach(t => {
     if (!state.selectedTests.has(t.n) || !t.c) return;
     for (const [fi, lines] of Object.entries(t.c)) {
+      if (!merged[fi]) merged[fi] = new Set();
+      lines.forEach(l => merged[fi].add(l));
+    }
+  });
+  return merged;
+}
+
+function getInstrLineSets() {
+  return state.coverageMode === 'all' ? instrLineSetsAll : getSelectedInstrLineSets();
+}
+
+function getSelectedInstrLineSets() {
+  const merged = {};
+  DATA.tests.forEach(t => {
+    if (!state.selectedTests.has(t.n) || !t.i) return;
+    for (const [fi, lines] of Object.entries(t.i)) {
       if (!merged[fi]) merged[fi] = new Set();
       lines.forEach(l => merged[fi].add(l));
     }
@@ -512,9 +610,10 @@ function getTestGroupCoverage(prefix) {
 function buildDiffList(testA, testB) {
   const covA = getTestGroupCoverage(testA);
   const covB = getTestGroupCoverage(testB);
+  const instr = getTestGroupInstrLines(testA, testB);
   const diffs = [];
   DATA.files.forEach((f, fi) => {
-    const instrSet = instrLineSets[fi] || new Set();
+    const instrSet = instr[fi] || new Set();
     const setA = covA[fi] || new Set();
     const setB = covB[fi] || new Set();
     const sortedLines = Array.from(instrSet).sort((a, b) => a - b);
@@ -527,6 +626,19 @@ function buildDiffList(testA, testB) {
     }
   });
   return diffs;
+}
+
+function getTestGroupInstrLines(testA, testB) {
+  const merged = {};
+  DATA.tests.forEach(t => {
+    if (!t.i) return;
+    if (t.n !== testA && !t.n.startsWith(testA + '/') && t.n !== testB && !t.n.startsWith(testB + '/')) return;
+    for (const [fi, lines] of Object.entries(t.i)) {
+      if (!merged[fi]) merged[fi] = new Set();
+      lines.forEach(l => merged[fi].add(l));
+    }
+  });
+  return merged;
 }
 
 function renderDiffBadges() {
@@ -664,6 +776,7 @@ function renderSourceCode() {
   const file = DATA.files[fi];
   if (!file) { container.innerHTML = ''; return; }
 
+  const instrLineSets = getInstrLineSets();
   const instrSet = instrLineSets[fi] || new Set();
 
   // Update file select to show coverage %
@@ -726,6 +839,7 @@ function escapeHTML(s) {
 // ========== Stats ==========
 function updateStats() {
   const merged = getMergedCoverage();
+  const instrLineSets = getInstrLineSets();
   let totalInstr = 0, totalCov = 0;
   for (const [fi, instrSet] of Object.entries(instrLineSets)) {
     totalInstr += instrSet.size;
@@ -733,9 +847,11 @@ function updateStats() {
     for (const l of instrSet) { if (cov.has(l)) totalCov++; }
   }
   const pct = totalInstr > 0 ? (totalCov / totalInstr * 100).toFixed(1) : '0.0';
+  const modeLine = state.coverageMode === 'all'
+    ? 'Mode: All goroutines'
+    : 'Selected: ' + state.selectedTests.size + ' / ' + DATA.tests.length;
   document.getElementById('test-stats').innerHTML =
-    'Selected: ' + state.selectedTests.size + ' / ' + DATA.tests.length +
-    '<br>Coverage: ' + pct + '%';
+    modeLine + '<br>Coverage: ' + pct + '%';
 }
 
 // ========== Overlap Matrix (SVG) ==========
@@ -868,6 +984,7 @@ function setupOverlapFilters() {
 function startCompare(testA, testB) {
   // Select both test groups and enter compare mode
   state.selectedTests.clear();
+  setCoverageModeSelected();
   selectTestAndChildren(testA);
   selectTestAndChildren(testB);
   updateAllCheckboxes();
@@ -875,6 +992,10 @@ function startCompare(testA, testB) {
   updateStats();
   updateHeaderBadge();
   document.querySelector('.tab[data-tab="coverage"]').click();
+}
+
+function setCoverageModeSelected() {
+  applyCoverageMode('selected');
 }
 
 function selectTestAndChildren(prefix) {
@@ -887,17 +1008,10 @@ function selectTestAndChildren(prefix) {
 
 // ========== Summary ==========
 function renderSummary() {
-  const allMerged = {};
-  DATA.tests.forEach(t => {
-    if (!t.c) return;
-    for (const [fi, lines] of Object.entries(t.c)) {
-      if (!allMerged[fi]) allMerged[fi] = new Set();
-      lines.forEach(l => allMerged[fi].add(l));
-    }
-  });
+  const allMerged = getSummaryCoverage();
 
   let totalInstr = 0, totalCov = 0;
-  for (const [fi, instrSet] of Object.entries(instrLineSets)) {
+  for (const [fi, instrSet] of Object.entries(instrLineSetsAll)) {
     totalInstr += instrSet.size;
     const cov = allMerged[fi] || new Set();
     for (const l of instrSet) { if (cov.has(l)) totalCov++; }
@@ -915,7 +1029,7 @@ function renderSummary() {
   fileBody.innerHTML = '';
   const fileRows = [];
   DATA.files.forEach((f, fi) => {
-    const instrSet = instrLineSets[fi] || new Set();
+    const instrSet = instrLineSetsAll[fi] || new Set();
     const cov = allMerged[fi] || new Set();
     let covered = 0;
     for (const l of instrSet) { if (cov.has(l)) covered++; }
@@ -933,30 +1047,34 @@ function renderSummary() {
     fileBody.appendChild(tr);
   });
 
-  // Per-test coverage (top-level)
+  // Per-test coverage (top-level, scoped to each test's instrumented lines)
   const testBody = document.querySelector('#test-coverage-table tbody');
   testBody.innerHTML = '';
   const topLevelMap = {};
   DATA.tests.forEach(t => {
-    if (!t.c) return;
     const topName = t.n.split('/')[0];
-    if (!topLevelMap[topName]) topLevelMap[topName] = new Set();
-    for (const [fi, lines] of Object.entries(t.c)) {
-      lines.forEach(l => topLevelMap[topName].add(fi + ':' + l));
+    if (!topLevelMap[topName]) topLevelMap[topName] = { covered: new Set(), instr: new Set() };
+    if (t.i) {
+      for (const [fi, lines] of Object.entries(t.i)) {
+        lines.forEach(l => topLevelMap[topName].instr.add(fi + ':' + l));
+      }
+    }
+    if (t.c) {
+      for (const [fi, lines] of Object.entries(t.c)) {
+        lines.forEach(l => topLevelMap[topName].covered.add(fi + ':' + l));
+      }
     }
   });
 
   const testRows = [];
-  for (const [name, covSet] of Object.entries(topLevelMap)) {
+  for (const [name, sets] of Object.entries(topLevelMap)) {
+    const total = sets.instr.size;
     let covered = 0;
-    for (const key of covSet) {
-      const sep = key.indexOf(':');
-      const fi = key.substring(0, sep);
-      const line = parseInt(key.substring(sep + 1));
-      const instrSet = instrLineSets[fi];
-      if (instrSet && instrSet.has(line)) covered++;
+    for (const key of sets.covered) {
+      if (sets.instr.has(key)) covered++;
     }
-    testRows.push({ name: name, covered: covered, total: totalInstr, pct: totalInstr > 0 ? covered / totalInstr : 0 });
+    const pct = total > 0 ? covered / total : 0;
+    testRows.push({ name: name, covered: covered, total: total, pct: pct });
   }
   testRows.sort((a, b) => b.pct - a.pct);
   testRows.forEach(r => {
@@ -968,6 +1086,21 @@ function renderSummary() {
       '<td>' + covBarHTML(r.pct) + ' ' + (r.pct * 100).toFixed(1) + '%</td>';
     testBody.appendChild(tr);
   });
+}
+
+function getSummaryCoverage() {
+  if (DATA.allCoverage) {
+    return allCoverageSets;
+  }
+  const merged = {};
+  DATA.tests.forEach(t => {
+    if (!t.c) return;
+    for (const [fi, lines] of Object.entries(t.c)) {
+      if (!merged[fi]) merged[fi] = new Set();
+      lines.forEach(l => merged[fi].add(l));
+    }
+  });
+  return merged;
 }
 
 function covBarHTML(pct) {

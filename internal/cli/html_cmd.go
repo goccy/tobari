@@ -74,11 +74,12 @@ func (c *CLI) runHTMLCmd(ctx context.Context, args []string) error {
 	}
 
 	// tobari.json → interactive HTML report
-	entriesMap, err := parseTobariJSON(data)
+	report, err := parseTobariJSON(data)
 	if err != nil {
 		return fmt.Errorf("failed to parse tobari.json: %w", err)
 	}
-	if err := generateTobarifmtReport(entriesMap, *output, sourceDir); err != nil {
+	entriesMap := expandCoverReport(report)
+	if err := generateTobarifmtReport(report, entriesMap, *output, sourceDir); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(c.stdout, "HTML coverage report written to %s\n", *output); err != nil {
@@ -124,8 +125,8 @@ func (c *CLI) generateCoverprofileHTML(ctx context.Context, coverprofileContent,
 }
 
 // generateTobarifmtReport generates the interactive HTML report from tobari.json data.
-func generateTobarifmtReport(entriesMap map[string][]tobariJSONEntry, output string, sourceDir string) error {
-	filePaths, fileIndexMap := buildFileIndex(entriesMap)
+func generateTobarifmtReport(report *tobari.CoverReport, entriesMap map[string][]tobariJSONEntry, output string, sourceDir string) error {
+	filePaths, fileIndexMap := buildFileIndexFromReport(report)
 	shortNames := shortenFilePaths(filePaths)
 
 	files := make([]*tobarifmtFile, len(filePaths))
@@ -157,7 +158,7 @@ func generateTobarifmtReport(entriesMap map[string][]tobariJSONEntry, output str
 		}
 	}
 
-	td := buildTobarifmtData(entriesMap, files, fileIndexMap)
+	td := buildTobarifmtData(report, entriesMap, files, fileIndexMap)
 
 	outputFile, err := os.Create(output)
 	if err != nil {
@@ -172,11 +173,11 @@ func generateTobarifmtReport(entriesMap map[string][]tobariJSONEntry, output str
 }
 
 type tobariJSONEntry struct {
-	FileName       string        `json:"FileName"`
+	FileName       string         `json:"FileName"`
 	Start          tobariEntryPos `json:"Start"`
 	End            tobariEntryPos `json:"End"`
-	StatementCount int           `json:"StatementCount"`
-	Count          int           `json:"Count"`
+	StatementCount int            `json:"StatementCount"`
+	Count          int            `json:"Count"`
 }
 
 type tobariEntryPos struct {
@@ -215,19 +216,17 @@ func findCoverageColonIndex(line string) int {
 	return -1
 }
 
-// parseTobariJSON auto-detects the tobari.json format (legacy or compact)
-// and returns the entries as a map[string][]tobariJSONEntry.
-func parseTobariJSON(data []byte) (map[string][]tobariJSONEntry, error) {
+// parseTobariJSON parses tobari.json (compact format only)
+// and returns the report.
+func parseTobariJSON(data []byte) (*tobari.CoverReport, error) {
 	var report tobari.CoverReport
-	if err := json.Unmarshal(data, &report); err == nil && report.Metadata.Files != nil {
-		return expandCoverReport(&report), nil
-	}
-
-	var entriesMap map[string][]tobariJSONEntry
-	if err := json.Unmarshal(data, &entriesMap); err != nil {
+	if err := json.Unmarshal(data, &report); err != nil {
 		return nil, fmt.Errorf("failed to decode tobari.json: %w", err)
 	}
-	return entriesMap, nil
+	if report.Metadata.Files == nil {
+		return nil, fmt.Errorf("failed to decode tobari.json: missing metadata")
+	}
+	return &report, nil
 }
 
 // expandCoverReport converts a compact CoverReport to the legacy entry map format.

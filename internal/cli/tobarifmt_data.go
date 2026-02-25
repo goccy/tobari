@@ -4,21 +4,26 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/goccy/tobari"
 )
 
 // tobarifmtData is the top-level structure serialized as JSON into the HTML.
 type tobarifmtData struct {
-	Tests      []*tobarifmtTest    `json:"tests"`
-	TestTree   []*tobarifmtTestNode    `json:"testTree"`
-	Files      []*tobarifmtFile    `json:"files"`
-	Overlaps   []*tobarifmtOverlapPair `json:"overlaps"`
-	InstrLines map[int][]int  `json:"instrLines"` // fileIndex → all instrumented line numbers (Count >= 0)
+	Tests            []*tobarifmtTest        `json:"tests"`
+	TestTree         []*tobarifmtTestNode    `json:"testTree"`
+	Files            []*tobarifmtFile        `json:"files"`
+	Overlaps         []*tobarifmtOverlapPair `json:"overlaps"`
+	InstrLinesAll    map[int][]int           `json:"instrLinesAll"`    // fileIndex → all instrumented line numbers (from metadata.all)
+	InstrLinesScoped map[int][]int           `json:"instrLinesScoped"` // fileIndex → instrumented line numbers within CoverWithName scope
+	AllCoverage      map[int][]int           `json:"allCoverage"`      // fileIndex → covered line numbers from allcounts
 }
 
 // tobarifmtTest represents a test with line-level coverage (compact representation).
 type tobarifmtTest struct {
 	Name     string        `json:"n"`
 	Coverage map[int][]int `json:"c"` // fileIndex → sorted list of covered line numbers
+	Instr    map[int][]int `json:"i"` // fileIndex → sorted list of instrumented line numbers
 }
 
 // tobarifmtFile represents a source file with its content.
@@ -30,9 +35,9 @@ type tobarifmtFile struct {
 
 // tobarifmtTestNode represents a node in the test name tree.
 type tobarifmtTestNode struct {
-	Name     string      `json:"name"`
-	FullName string      `json:"fullName"`
-	IsLeaf   bool        `json:"isLeaf"`
+	Name     string               `json:"name"`
+	FullName string               `json:"fullName"`
+	IsLeaf   bool                 `json:"isLeaf"`
 	Children []*tobarifmtTestNode `json:"children,omitempty"`
 }
 
@@ -107,6 +112,36 @@ func convertToLineCoverage(entries []tobariJSONEntry, fileIndexMap map[string]in
 
 	result := make(map[int][]int, len(coveredLines))
 	for fi, lines := range coveredLines {
+		sorted := make([]int, 0, len(lines))
+		for line := range lines {
+			sorted = append(sorted, line)
+		}
+		sort.Ints(sorted)
+		result[fi] = sorted
+	}
+	return result
+}
+
+// convertToLineInstrumented converts raw tobariJSONEntry entries to a line-level
+// instrumented map (includes Count=0 entries).
+func convertToLineInstrumented(entries []tobariJSONEntry, fileIndexMap map[string]int) map[int][]int {
+	instrLines := make(map[int]map[int]struct{})
+
+	for _, e := range entries {
+		fi, ok := fileIndexMap[e.FileName]
+		if !ok {
+			continue
+		}
+		if instrLines[fi] == nil {
+			instrLines[fi] = make(map[int]struct{})
+		}
+		for line := e.Start.Line; line <= e.End.Line; line++ {
+			instrLines[fi][line] = struct{}{}
+		}
+	}
+
+	result := make(map[int][]int, len(instrLines))
+	for fi, lines := range instrLines {
 		sorted := make([]int, 0, len(lines))
 		for line := range lines {
 			sorted = append(sorted, line)
@@ -235,7 +270,29 @@ func shortenFilePaths(paths []string) []string {
 
 // collectUncoveredLines determines which lines in each file have coverage entries
 // but are not covered by the given entries.
-func collectAllCoverageLines(entriesMap map[string][]tobariJSONEntry, fileIndexMap map[string]int) map[int]map[int]struct{} {
+func collectAllCoverageLines(report *tobari.CoverReport) map[int]map[int]struct{} {
+	allLines := make(map[int]map[int]struct{})
+	for _, block := range report.Metadata.All {
+		if len(block) != 6 {
+			continue
+		}
+		fileIdx := block[0]
+		if fileIdx < 0 || fileIdx >= len(report.Metadata.Files) {
+			continue
+		}
+		if allLines[fileIdx] == nil {
+			allLines[fileIdx] = make(map[int]struct{})
+		}
+		startLine := block[1]
+		endLine := block[3]
+		for line := startLine; line <= endLine; line++ {
+			allLines[fileIdx][line] = struct{}{}
+		}
+	}
+	return allLines
+}
+
+func collectScopedCoverageLines(entriesMap map[string][]tobariJSONEntry, fileIndexMap map[string]int) map[int]map[int]struct{} {
 	allLines := make(map[int]map[int]struct{})
 	for _, entries := range entriesMap {
 		for _, e := range entries {
@@ -254,8 +311,46 @@ func collectAllCoverageLines(entriesMap map[string][]tobariJSONEntry, fileIndexM
 	return allLines
 }
 
+func buildAllCoverage(report *tobari.CoverReport) map[int][]int {
+	if len(report.AllCounts) != len(report.Metadata.All) {
+		return nil
+	}
+	covered := make(map[int]map[int]struct{})
+	for i, block := range report.Metadata.All {
+		if len(block) != 6 {
+			continue
+		}
+		if i < 0 || i >= len(report.AllCounts) || report.AllCounts[i] <= 0 {
+			continue
+		}
+		fileIdx := block[0]
+		if fileIdx < 0 || fileIdx >= len(report.Metadata.Files) {
+			continue
+		}
+		if covered[fileIdx] == nil {
+			covered[fileIdx] = make(map[int]struct{})
+		}
+		startLine := block[1]
+		endLine := block[3]
+		for line := startLine; line <= endLine; line++ {
+			covered[fileIdx][line] = struct{}{}
+		}
+	}
+
+	result := make(map[int][]int, len(covered))
+	for fi, lineSet := range covered {
+		sorted := make([]int, 0, len(lineSet))
+		for line := range lineSet {
+			sorted = append(sorted, line)
+		}
+		sort.Ints(sorted)
+		result[fi] = sorted
+	}
+	return result
+}
+
 // buildTobarifmtData constructs the tobarifmtData from parsed tobari.json entries and source files.
-func buildTobarifmtData(entriesMap map[string][]tobariJSONEntry, files []*tobarifmtFile, fileIndexMap map[string]int) *tobarifmtData {
+func buildTobarifmtData(report *tobari.CoverReport, entriesMap map[string][]tobariJSONEntry, files []*tobarifmtFile, fileIndexMap map[string]int) *tobarifmtData {
 	// Build tests with line-level coverage
 	var testNames []string
 	for name := range entriesMap {
@@ -267,16 +362,19 @@ func buildTobarifmtData(entriesMap map[string][]tobariJSONEntry, files []*tobari
 	for _, name := range testNames {
 		entries := entriesMap[name]
 		cov := convertToLineCoverage(entries, fileIndexMap)
+		instr := convertToLineInstrumented(entries, fileIndexMap)
 		// Only include non-empty coverage
 		if len(cov) > 0 {
 			tests = append(tests, &tobarifmtTest{
 				Name:     name,
 				Coverage: cov,
+				Instr:    instr,
 			})
 		} else {
 			tests = append(tests, &tobarifmtTest{
 				Name:     name,
 				Coverage: nil,
+				Instr:    instr,
 			})
 		}
 	}
@@ -287,42 +385,49 @@ func buildTobarifmtData(entriesMap map[string][]tobariJSONEntry, files []*tobari
 	// Compute overlaps
 	overlaps := computeOverlaps(entriesMap, fileIndexMap)
 
-	// Compute all instrumented lines per file (lines from any entry, regardless of Count)
-	allInstrLines := collectAllCoverageLines(entriesMap, fileIndexMap)
-	instrLines := make(map[int][]int, len(allInstrLines))
+	// Compute all instrumented lines per file (from metadata.all)
+	allInstrLines := collectAllCoverageLines(report)
+	instrLinesAll := make(map[int][]int, len(allInstrLines))
 	for fi, lineSet := range allInstrLines {
 		sorted := make([]int, 0, len(lineSet))
 		for line := range lineSet {
 			sorted = append(sorted, line)
 		}
 		sort.Ints(sorted)
-		instrLines[fi] = sorted
+		instrLinesAll[fi] = sorted
 	}
 
+	// Compute instrumented lines within CoverWithName scope
+	scopedInstrLines := collectScopedCoverageLines(entriesMap, fileIndexMap)
+	instrLinesScoped := make(map[int][]int, len(scopedInstrLines))
+	for fi, lineSet := range scopedInstrLines {
+		sorted := make([]int, 0, len(lineSet))
+		for line := range lineSet {
+			sorted = append(sorted, line)
+		}
+		sort.Ints(sorted)
+		instrLinesScoped[fi] = sorted
+	}
+
+	// Compute coverage from allcounts (if available)
+	allCoverage := buildAllCoverage(report)
+
 	return &tobarifmtData{
-		Tests:      tests,
-		TestTree:   tree,
-		Files:      files,
-		Overlaps:   overlaps,
-		InstrLines: instrLines,
+		Tests:            tests,
+		TestTree:         tree,
+		Files:            files,
+		Overlaps:         overlaps,
+		InstrLinesAll:    instrLinesAll,
+		InstrLinesScoped: instrLinesScoped,
+		AllCoverage:      allCoverage,
 	}
 }
 
-// buildFileIndex collects unique file paths from all entries and returns
-// the sorted paths and a map from path to index.
-func buildFileIndex(entriesMap map[string][]tobariJSONEntry) ([]string, map[string]int) {
-	pathSet := make(map[string]struct{})
-	for _, entries := range entriesMap {
-		for _, e := range entries {
-			pathSet[e.FileName] = struct{}{}
-		}
-	}
-
-	paths := make([]string, 0, len(pathSet))
-	for p := range pathSet {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
+// buildFileIndexFromReport returns file paths in metadata order and
+// a map from path to index.
+func buildFileIndexFromReport(report *tobari.CoverReport) ([]string, map[string]int) {
+	paths := make([]string, len(report.Metadata.Files))
+	copy(paths, report.Metadata.Files)
 
 	indexMap := make(map[string]int, len(paths))
 	for i, p := range paths {
@@ -330,4 +435,3 @@ func buildFileIndex(entriesMap map[string][]tobariJSONEntry) ([]string, map[stri
 	}
 	return paths, indexMap
 }
-

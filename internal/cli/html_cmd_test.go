@@ -63,6 +63,7 @@ func createTobariJSON(t *testing.T, dir, srcPath string) string {
 			{Name: "TestAdd", Coverprofile: [][]int{{0, 3}}},
 			{Name: "TestMain", Coverprofile: [][]int{{0, 2}, {1, 1}}},
 		},
+		AllCounts: []int{5, 1},
 	}
 	data, err := json.Marshal(report)
 	if err != nil {
@@ -125,10 +126,11 @@ func TestParseTobariJSON_CompactFormat(t *testing.T) {
 			{"name": "TestB", "coverprofile": [[0, 2], [1, 1]]}
 		]
 	}`)
-	entriesMap, err := parseTobariJSON(data)
+	report, err := parseTobariJSON(data)
 	if err != nil {
 		t.Fatalf("parseTobariJSON() error = %v", err)
 	}
+	entriesMap := expandCoverReport(report)
 	if len(entriesMap) != 2 {
 		t.Fatalf("expected 2 tests, got %d", len(entriesMap))
 	}
@@ -145,31 +147,6 @@ func TestParseTobariJSON_CompactFormat(t *testing.T) {
 	testB := entriesMap["TestB"]
 	if len(testB) != 2 {
 		t.Fatalf("TestB: expected 2 entries, got %d", len(testB))
-	}
-}
-
-func TestParseTobariJSON_LegacyFormat(t *testing.T) {
-	data := []byte(`{
-		"TestA": [
-			{"FileName": "/path/to/main.go", "Start": {"Line": 3, "Column": 24}, "End": {"Line": 5, "Column": 2}, "StatementCount": 1, "Count": 3}
-		],
-		"TestB": [
-			{"FileName": "/path/to/main.go", "Start": {"Line": 7, "Column": 13}, "End": {"Line": 9, "Column": 2}, "StatementCount": 1, "Count": 1}
-		]
-	}`)
-	entriesMap, err := parseTobariJSON(data)
-	if err != nil {
-		t.Fatalf("parseTobariJSON() error = %v", err)
-	}
-	if len(entriesMap) != 2 {
-		t.Fatalf("expected 2 tests, got %d", len(entriesMap))
-	}
-	testA := entriesMap["TestA"]
-	if len(testA) != 1 {
-		t.Fatalf("TestA: expected 1 entry, got %d", len(testA))
-	}
-	if testA[0].FileName != "/path/to/main.go" || testA[0].Count != 3 {
-		t.Errorf("TestA[0]: FileName=%q, Count=%d", testA[0].FileName, testA[0].Count)
 	}
 }
 
@@ -244,15 +221,16 @@ func TestRunHTMLCmd_TobariJSON_MergesCounts(t *testing.T) {
 			Files: []string{srcPath},
 			Entry: []string{"file", "startLine", "startCol", "endLine", "endCol", "stmts"},
 			All: [][]int{
-				{0, 3, 24, 5, 2, 1},   // block 0: add function
-				{0, 7, 13, 9, 2, 1},   // block 1: main function
-				{0, 11, 1, 13, 2, 1},  // block 2: uncovered function (no test covers it)
+				{0, 3, 24, 5, 2, 1},  // block 0: add function
+				{0, 7, 13, 9, 2, 1},  // block 1: main function
+				{0, 11, 1, 13, 2, 1}, // block 2: uncovered function (no test covers it)
 			},
 		},
 		Counts: []*tobari.CoverReportCount{
 			{Name: "TestAdd", Coverprofile: [][]int{{0, 3}}},
 			{Name: "TestMain", Coverprofile: [][]int{{0, 2}, {1, 1}}},
 		},
+		AllCounts: []int{5, 1, 0},
 	}
 	var buf strings.Builder
 	if err := report.WriteCoverprofile(&buf); err != nil {
