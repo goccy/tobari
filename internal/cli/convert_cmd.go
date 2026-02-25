@@ -46,6 +46,9 @@ func (c *CLI) runConvertCmd(_ context.Context, args []string) (e error) {
 	if err := json.Unmarshal(data, &report); err != nil {
 		return fmt.Errorf("failed to parse tobari.json: %w", err)
 	}
+	if report.Metadata.Files == nil {
+		return fmt.Errorf("failed to parse tobari.json: missing metadata")
+	}
 
 	f, err := os.Create(*output)
 	if err != nil {

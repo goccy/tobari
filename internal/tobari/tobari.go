@@ -610,10 +610,11 @@ func blockID(fileName string, blockIdx int) string {
 
 // CoverReportData holds compact coverage data built from internal state.
 type CoverReportData struct {
-	Files  []string
-	Entry  []string
-	All    [][]int
-	Counts []CoverReportCountData
+	Files     []string
+	Entry     []string
+	All       [][]int
+	Counts    []CoverReportCountData
+	AllCounts []int
 }
 
 // CoverReportCountData holds a test name and its coverage entries.
@@ -646,7 +647,7 @@ func CollectCoverReportData() *CoverReportData {
 
 	// Build block key to index map and "all" array.
 	type blockKey struct {
-		fileIdx  int
+		fileIdx                                        int
 		startLine, startCol, endLine, endCol, numStmts int
 	}
 	blockIndex := make(map[blockKey]int)
@@ -665,6 +666,35 @@ func CollectCoverReportData() *CoverReportData {
 			blockIndex[bk] = len(all)
 			all = append(all, []int{bk.fileIdx, bk.startLine, bk.startCol, bk.endLine, bk.endCol, bk.numStmts})
 		}
+	}
+
+	// Build allcounts from all goroutines.
+	gMapMu.RLock()
+	blockToCountMap := make(map[string]int)
+	for _, g := range gMap {
+		g.blockToCountMap(blockToCountMap, make(map[uint64]struct{}))
+	}
+	gMapMu.RUnlock()
+
+	allCounts := make([]int, len(all))
+	for bid, count := range blockToCountMap {
+		block := getBlock(bid)
+		if block == nil {
+			continue
+		}
+		bk := blockKey{
+			fileIdx:   fileSet[block.FileName],
+			startLine: block.Start.Line,
+			startCol:  block.Start.Col,
+			endLine:   block.End.Line,
+			endCol:    block.End.Col,
+			numStmts:  block.NumStmts,
+		}
+		idx, ok := blockIndex[bk]
+		if !ok {
+			continue
+		}
+		allCounts[idx] = count
 	}
 
 	// Build per-test counts.
@@ -701,10 +731,11 @@ func CollectCoverReportData() *CoverReportData {
 	}
 
 	return &CoverReportData{
-		Files: files,
-		Entry: []string{"FileName", "StartLine", "StartCol", "EndLine", "EndCol", "StatementCount"},
-		All:   all,
-		Counts: counts,
+		Files:     files,
+		Entry:     []string{"FileName", "StartLine", "StartCol", "EndLine", "EndCol", "StatementCount"},
+		All:       all,
+		Counts:    counts,
+		AllCounts: allCounts,
 	}
 }
 
@@ -722,8 +753,9 @@ func MarshalCoverJSON() ([]byte, error) {
 		Coverprofile [][]int `json:"coverprofile"`
 	}
 	type jsonReport struct {
-		Metadata jsonMetadata `json:"metadata"`
-		Counts   []jsonCount  `json:"counts"`
+		Metadata  jsonMetadata `json:"metadata"`
+		Counts    []jsonCount  `json:"counts"`
+		AllCounts []int        `json:"allcounts,omitempty"`
 	}
 	counts := make([]jsonCount, len(data.Counts))
 	for i, c := range data.Counts {
@@ -735,7 +767,8 @@ func MarshalCoverJSON() ([]byte, error) {
 			Entry: data.Entry,
 			All:   data.All,
 		},
-		Counts: counts,
+		Counts:    counts,
+		AllCounts: data.AllCounts,
 	})
 }
 

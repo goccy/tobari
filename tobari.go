@@ -182,8 +182,9 @@ func toEntry(e *tobari.CoverEntry) *Entry {
 // The struct mirrors the tobari.json schema directly, so json.Marshal
 // produces the compact format without custom marshaling.
 type CoverReport struct {
-	Metadata CoverReportMetadata `json:"metadata"`
-	Counts   []*CoverReportCount `json:"counts"`
+	Metadata  CoverReportMetadata `json:"metadata"`
+	Counts    []*CoverReportCount `json:"counts"`
+	AllCounts []int               `json:"allcounts,omitempty"`
 }
 
 // CoverReportMetadata contains file names, entry column definitions,
@@ -217,13 +218,15 @@ func CollectCoverReport() *CoverReport {
 			Entry: data.Entry,
 			All:   data.All,
 		},
-		Counts: counts,
+		Counts:    counts,
+		AllCounts: data.AllCounts,
 	}
 }
 
 // WriteCoverprofile writes the merged coverage data in coverprofile format.
 // All blocks from Metadata.All are included; blocks not covered by any test
-// appear with count=0. Counts from all tests are summed per block.
+// appear with count=0. If AllCounts is present, it is used directly;
+// otherwise counts from all tests are summed per block.
 func (r *CoverReport) WriteCoverprofile(w io.Writer) error {
 	type blockEntry struct {
 		key            string
@@ -250,14 +253,22 @@ func (r *CoverReport) WriteCoverprofile(w io.Writer) error {
 		blockByIdx[i] = entry
 	}
 
-	// Overlay counts from each test.
-	for _, c := range r.Counts {
-		for _, cp := range c.Coverprofile {
-			if len(cp) != 2 {
-				continue
+	if len(r.AllCounts) == len(r.Metadata.All) {
+		for i, count := range r.AllCounts {
+			if entry, ok := blockByIdx[i]; ok {
+				entry.count = count
 			}
-			if entry, ok := blockByIdx[cp[0]]; ok {
-				entry.count += cp[1]
+		}
+	} else {
+		// Overlay counts from each test.
+		for _, c := range r.Counts {
+			for _, cp := range c.Coverprofile {
+				if len(cp) != 2 {
+					continue
+				}
+				if entry, ok := blockByIdx[cp[0]]; ok {
+					entry.count += cp[1]
+				}
 			}
 		}
 	}
