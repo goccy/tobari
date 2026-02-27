@@ -2,7 +2,9 @@ package tobari
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/goccy/tobari/internal/tobari"
 )
@@ -305,6 +308,128 @@ func (r *CoverReport) MarshalTOON() ([]byte, error) {
 	})
 }
 
+// MergeCoverReports merges multiple CoverReport values into a single unified report.
+// File lists and block definitions are unified with deduplication, block indices
+// in Counts are remapped accordingly, and AllCounts are summed per block.
+func MergeCoverReports(reports []*CoverReport) (*CoverReport, error) {
+	if len(reports) == 0 {
+		return nil, fmt.Errorf("no reports to merge")
+	}
+
+	// Build unified sorted file list.
+	fileSet := make(map[string]struct{})
+	for _, r := range reports {
+		for _, f := range r.Metadata.Files {
+			fileSet[f] = struct{}{}
+		}
+	}
+	unifiedFiles := make([]string, 0, len(fileSet))
+	for f := range fileSet {
+		unifiedFiles = append(unifiedFiles, f)
+	}
+	sort.Strings(unifiedFiles)
+
+	fileIndex := make(map[string]int, len(unifiedFiles))
+	for i, f := range unifiedFiles {
+		fileIndex[f] = i
+	}
+
+	// Build unified block list with deduplication.
+	type blockKey struct {
+		fileIdx, startLine, startCol, endLine, endCol, numStmts int
+	}
+	blockMap := make(map[blockKey]int)
+	var unifiedAll [][]int
+
+	// Per-report block index mapping (old block idx -> new block idx).
+	blockMaps := make([]map[int]int, len(reports))
+	for i, r := range reports {
+		blockMaps[i] = make(map[int]int, len(r.Metadata.All))
+		for j, block := range r.Metadata.All {
+			if len(block) != 6 {
+				continue
+			}
+			oldFileIdx := block[0]
+			if oldFileIdx < 0 || oldFileIdx >= len(r.Metadata.Files) {
+				continue
+			}
+			key := blockKey{
+				fileIdx:   fileIndex[r.Metadata.Files[oldFileIdx]],
+				startLine: block[1],
+				startCol:  block[2],
+				endLine:   block[3],
+				endCol:    block[4],
+				numStmts:  block[5],
+			}
+			if newIdx, ok := blockMap[key]; ok {
+				blockMaps[i][j] = newIdx
+			} else {
+				newIdx := len(unifiedAll)
+				blockMap[key] = newIdx
+				unifiedAll = append(unifiedAll, []int{
+					key.fileIdx, key.startLine, key.startCol,
+					key.endLine, key.endCol, key.numStmts,
+				})
+				blockMaps[i][j] = newIdx
+			}
+		}
+	}
+
+	// Remap and concatenate counts.
+	mergedCounts := make([]*CoverReportCount, 0)
+	for i, r := range reports {
+		for _, c := range r.Counts {
+			newProfile := make([][]int, 0, len(c.Coverprofile))
+			for _, cp := range c.Coverprofile {
+				if len(cp) != 2 {
+					continue
+				}
+				if newIdx, ok := blockMaps[i][cp[0]]; ok {
+					newProfile = append(newProfile, []int{newIdx, cp[1]})
+				}
+			}
+			mergedCounts = append(mergedCounts, &CoverReportCount{
+				Name:         c.Name,
+				Coverprofile: newProfile,
+			})
+		}
+	}
+
+	// Compute AllCounts. For each report, use AllCounts if available,
+	// otherwise sum from individual Counts.
+	allCounts := make([]int, len(unifiedAll))
+	for i, r := range reports {
+		if len(r.AllCounts) == len(r.Metadata.All) {
+			for oldIdx, count := range r.AllCounts {
+				if newIdx, ok := blockMaps[i][oldIdx]; ok {
+					allCounts[newIdx] += count
+				}
+			}
+		} else {
+			for _, c := range r.Counts {
+				for _, cp := range c.Coverprofile {
+					if len(cp) != 2 {
+						continue
+					}
+					if newIdx, ok := blockMaps[i][cp[0]]; ok {
+						allCounts[newIdx] += cp[1]
+					}
+				}
+			}
+		}
+	}
+
+	return &CoverReport{
+		Metadata: CoverReportMetadata{
+			Files: unifiedFiles,
+			Entry: reports[0].Metadata.Entry,
+			All:   unifiedAll,
+		},
+		Counts:    mergedCounts,
+		AllCounts: allCounts,
+	}, nil
+}
+
 // ReadCoverArchivedFile extracts the original source files embedded during
 // coverage instrumentation and returns them as a tar.gz archive.
 // Returns nil if no sources were embedded.
@@ -318,12 +443,20 @@ func ReadCoverArchivedFile() io.Reader {
 		return nil
 	}
 
+	// Sort paths for deterministic (idempotent) tar.gz output.
+	paths := make([]string, 0, len(sources))
+	for p := range sources {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
 	pr, pw := io.Pipe()
 	go func() {
 		gw := gzip.NewWriter(pw)
 		tw := tar.NewWriter(gw)
 
-		for origPath, compressed := range sources {
+		for _, origPath := range paths {
+			compressed := sources[origPath]
 			// Decompress from rodata string via strings.NewReader (zero-copy)
 			if err := func() error {
 				gr, err := gzip.NewReader(strings.NewReader(compressed))
@@ -357,4 +490,94 @@ func ReadCoverArchivedFile() io.Reader {
 		pw.CloseWithError(errors.Join(tw.Close(), gw.Close()))
 	}()
 	return pr
+}
+
+// MergeCoverArchivedFiles merges multiple tar.gz source archives into a single archive.
+// Duplicate archives (identical SHA-256 hash) are automatically skipped.
+// If the same file path appears in multiple archives with different content,
+// an error is returned. The output is deterministic: entries are sorted by path
+// and gzip metadata is fixed, so identical inputs always produce identical output.
+func MergeCoverArchivedFiles(inputs []io.Reader, w io.Writer) error {
+	if len(inputs) == 0 {
+		return fmt.Errorf("no inputs to merge")
+	}
+
+	// Read all inputs and deduplicate by SHA-256 hash.
+	seen := make(map[[sha256.Size]byte]struct{})
+	var uniqueData [][]byte
+	for _, r := range inputs {
+		data, err := io.ReadAll(r)
+		if err != nil {
+			return fmt.Errorf("failed to read input: %w", err)
+		}
+		hash := sha256.Sum256(data)
+		if _, ok := seen[hash]; ok {
+			continue
+		}
+		seen[hash] = struct{}{}
+		uniqueData = append(uniqueData, data)
+	}
+
+	// Extract all unique archives and detect conflicts.
+	type fileEntry struct {
+		content []byte
+		hash    [sha256.Size]byte
+	}
+	files := make(map[string]*fileEntry)
+
+	for _, data := range uniqueData {
+		gr, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return fmt.Errorf("failed to create gzip reader: %w", err)
+		}
+		tr := tar.NewReader(gr)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("failed to read tar entry: %w", err)
+			}
+			content, err := io.ReadAll(tr)
+			if err != nil {
+				return fmt.Errorf("failed to read content for %s: %w", hdr.Name, err)
+			}
+			contentHash := sha256.Sum256(content)
+			if existing, ok := files[hdr.Name]; ok {
+				if existing.hash != contentHash {
+					return fmt.Errorf("conflict: file %q has different content in source archives", hdr.Name)
+				}
+				continue
+			}
+			files[hdr.Name] = &fileEntry{content: content, hash: contentHash}
+		}
+		_ = gr.Close()
+	}
+
+	// Sort paths for deterministic output.
+	sortedPaths := make([]string, 0, len(files))
+	for p := range files {
+		sortedPaths = append(sortedPaths, p)
+	}
+	sort.Strings(sortedPaths)
+
+	// Write merged tar.gz with deterministic gzip header.
+	gw := gzip.NewWriter(w)
+	gw.Header.ModTime = time.Unix(0, 0)
+	tw := tar.NewWriter(gw)
+	for _, p := range sortedPaths {
+		entry := files[p]
+		if err := tw.WriteHeader(&tar.Header{
+			Name: p,
+			Mode: 0o600,
+			Size: int64(len(entry.content)),
+		}); err != nil {
+			return fmt.Errorf("failed to write header for %s: %w", p, err)
+		}
+		if _, err := tw.Write(entry.content); err != nil {
+			return fmt.Errorf("failed to write content for %s: %w", p, err)
+		}
+	}
+	return errors.Join(tw.Close(), gw.Close())
 }

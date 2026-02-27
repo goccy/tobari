@@ -13,6 +13,7 @@ Commands:
     extract     Extract embedded source code from an instrumented binary
     html        Generate HTML coverage report
     convert     Convert tobari.json to coverprofile format
+    merge       Merge multiple tobari.json or source archives
     version     Show version information
     help        Show this help message
 
@@ -35,6 +36,15 @@ HTML Command Options:
 
 Convert Command Options:
     -o <file>           Output coverprofile file path (default: cover.out)
+
+Merge Command:
+    tobari merge json [-o merged.json] <file1.json> <file2.json> [...]
+    tobari merge source [-o merged.tar.gz] <a.tar.gz> <b.tar.gz> [...]
+
+    merge json      Merge multiple tobari.json files into one
+    merge source    Merge multiple source tar.gz archives into one
+                    Duplicate archives (same SHA-256 hash) are skipped.
+                    Conflicting files (same path, different content) cause an error.
 
 Toolexec Options (used with -toolexec):
     --embed-code        Embed original source code into the instrumented binary
@@ -66,6 +76,12 @@ Examples:
 
     # Convert tobari.json to coverprofile
     tobari convert -o profile.cover tobari.json
+
+    # Merge multiple tobari.json files
+    tobari merge json -o merged.json a.json b.json
+
+    # Merge multiple source archives
+    tobari merge source -o merged.tar.gz a.tar.gz b.tar.gz
 
     # Show version
     tobari version

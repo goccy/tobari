@@ -2,6 +2,7 @@ package tobari_test
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goccy/tobari"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -521,4 +523,81 @@ func extractAndHashTarGz(t *testing.T, path string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+func TestMergeCoverArchivedFiles_DeterministicOutput(t *testing.T) {
+	inputA := createTestTarGzData(t, map[string]string{
+		"/src/main.go":  "package main\n",
+		"/src/util.go":  "package main\n\nfunc util() {}\n",
+		"/README.md":    "example\n",
+		"/LICENSE.txt":  "license\n",
+		"/docs/doc.txt": "doc\n",
+	})
+	inputB := createTestTarGzData(t, map[string]string{
+		"/src/extra.go": "package main\n\nfunc extra() {}\n",
+	})
+
+	var out1 bytes.Buffer
+	if err := tobari.MergeCoverArchivedFiles([]io.Reader{
+		bytes.NewReader(inputA),
+		bytes.NewReader(inputB),
+	}, &out1); err != nil {
+		t.Fatalf("MergeCoverArchivedFiles first run failed: %v", err)
+	}
+
+	var out2 bytes.Buffer
+	if err := tobari.MergeCoverArchivedFiles([]io.Reader{
+		bytes.NewReader(inputA),
+		bytes.NewReader(inputB),
+	}, &out2); err != nil {
+		t.Fatalf("MergeCoverArchivedFiles second run failed: %v", err)
+	}
+
+	if !bytes.Equal(out1.Bytes(), out2.Bytes()) {
+		t.Fatal("merged tar.gz is not deterministic across runs")
+	}
+
+	gr, err := gzip.NewReader(bytes.NewReader(out1.Bytes()))
+	if err != nil {
+		t.Fatalf("failed to read gzip header: %v", err)
+	}
+	if !gr.Header.ModTime.IsZero() {
+		t.Fatalf("gzip header ModTime=%s, want zero time", gr.Header.ModTime)
+	}
+	_ = gr.Close()
+}
+
+func createTestTarGzData(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+
+	keys := make([]string, 0, len(files))
+	for k := range files {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, name := range keys {
+		content := []byte(files[name])
+		if err := tw.WriteHeader(&tar.Header{
+			Name: name,
+			Mode: 0o600,
+			Size: int64(len(content)),
+		}); err != nil {
+			t.Fatalf("write header for %s: %v", name, err)
+		}
+		if _, err := tw.Write(content); err != nil {
+			t.Fatalf("write content for %s: %v", name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	return buf.Bytes()
 }

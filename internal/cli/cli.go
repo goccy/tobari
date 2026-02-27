@@ -106,6 +106,8 @@ func (c *CLI) handleSubcommand(ctx context.Context, tobariBinPath, cmd string, a
 		return c.runHTMLCmd(ctx, args)
 	case "convert":
 		return c.runConvertCmd(ctx, args)
+	case "merge":
+		return c.runMergeCmd(ctx, args)
 	case "version":
 		return c.showVersion()
 	case "help":
