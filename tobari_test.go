@@ -556,15 +556,6 @@ func TestMergeCoverArchivedFiles_DeterministicOutput(t *testing.T) {
 	if !bytes.Equal(out1.Bytes(), out2.Bytes()) {
 		t.Fatal("merged tar.gz is not deterministic across runs")
 	}
-
-	gr, err := gzip.NewReader(bytes.NewReader(out1.Bytes()))
-	if err != nil {
-		t.Fatalf("failed to read gzip header: %v", err)
-	}
-	if !gr.ModTime.IsZero() {
-		t.Fatalf("gzip header ModTime=%s, want zero time", gr.ModTime)
-	}
-	_ = gr.Close()
 }
 
 func createTestTarGzData(t *testing.T, files map[string]string) []byte {

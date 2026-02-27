@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/goccy/tobari/internal/tobari"
 )
@@ -562,9 +561,8 @@ func MergeCoverArchivedFiles(inputs []io.Reader, w io.Writer) error {
 	}
 	sort.Strings(sortedPaths)
 
-	// Write merged tar.gz with deterministic gzip header.
+	// Write merged tar.gz.
 	gw := gzip.NewWriter(w)
-	gw.ModTime = time.Unix(0, 0)
 	tw := tar.NewWriter(gw)
 	for _, p := range sortedPaths {
 		entry := files[p]
