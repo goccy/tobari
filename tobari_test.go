@@ -561,8 +561,8 @@ func TestMergeCoverArchivedFiles_DeterministicOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read gzip header: %v", err)
 	}
-	if !gr.Header.ModTime.IsZero() {
-		t.Fatalf("gzip header ModTime=%s, want zero time", gr.Header.ModTime)
+	if !gr.ModTime.IsZero() {
+		t.Fatalf("gzip header ModTime=%s, want zero time", gr.ModTime)
 	}
 	_ = gr.Close()
 }

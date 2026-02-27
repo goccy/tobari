@@ -564,7 +564,7 @@ func MergeCoverArchivedFiles(inputs []io.Reader, w io.Writer) error {
 
 	// Write merged tar.gz with deterministic gzip header.
 	gw := gzip.NewWriter(w)
-	gw.Header.ModTime = time.Unix(0, 0)
+	gw.ModTime = time.Unix(0, 0)
 	tw := tar.NewWriter(gw)
 	for _, p := range sortedPaths {
 		entry := files[p]
