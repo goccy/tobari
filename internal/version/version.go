@@ -33,23 +33,28 @@ func (v *Version) ID() string {
 
 // Get determines the version of tobari binary being used.
 func Get() (*Version, error) {
+	if ver != "" {
+		return &Version{Ver: ver}, nil
+	}
+
+	// Prefer tagged/release version when available ( e.g. `go install ...@vX.Y.Z` ),
+	// even if compile-time source path still exists on disk ( module cache ).
+	buildInfo, ok := debug.ReadBuildInfo()
+	if ok && buildInfo.Main.Version != "" && !strings.Contains(buildInfo.Main.Version, "devel") {
+		return &Version{Ver: buildInfo.Main.Version}, nil
+	}
+
 	root := repoRoot()
 	if _, err := os.Stat(root); err == nil {
 		return &Version{LocalPath: root}, nil
 	}
 
-	if ver != "" {
-		return &Version{Ver: ver}, nil
-	}
-
-	buildInfo, ok := debug.ReadBuildInfo()
 	if !ok {
 		return nil, fmt.Errorf("failed to read build info")
 	}
 	if strings.Contains(buildInfo.Main.Version, "devel") {
 		return &Version{Ver: "main"}, nil
 	}
-
 	if buildInfo.Main.Version != "" {
 		return &Version{Ver: buildInfo.Main.Version}, nil
 	}
