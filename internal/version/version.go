@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+
+	"golang.org/x/mod/module"
 )
 
 // ver is set at build time via ldflags:
@@ -39,8 +41,12 @@ func Get() (*Version, error) {
 
 	// Prefer tagged/release version when available ( e.g. `go install ...@vX.Y.Z` ),
 	// even if compile-time source path still exists on disk ( module cache ).
+	// Exclude pseudo-versions (e.g. v0.0.0-20260228130905-0bb47f48a0ec) which
+	// Go 1.25+ stamps into Main.Version for VCS-tracked main-module builds.
 	buildInfo, ok := debug.ReadBuildInfo()
-	if ok && buildInfo.Main.Version != "" && !strings.Contains(buildInfo.Main.Version, "devel") {
+	if ok && buildInfo.Main.Version != "" &&
+		!strings.Contains(buildInfo.Main.Version, "devel") &&
+		!module.IsPseudoVersion(strings.TrimSuffix(buildInfo.Main.Version, "+dirty")) {
 		return &Version{Ver: buildInfo.Main.Version}, nil
 	}
 
