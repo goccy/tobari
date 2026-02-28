@@ -1,0 +1,53 @@
+---
+version: 2
+project_name: tobari
+
+builds:
+  - main: ./cmd/tobari
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X github.com/goccy/tobari/internal/version.ver=v{{.Version}}
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - name_template: >-
+      {{ .ProjectName }}_v{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - LICENSE
+      - README.md
+
+nfpms:
+  - file_name_template: >-
+      {{ .ProjectName }}_{{ .Version }}-1_{{ .Arch }}
+    homepage: https://github.com/goccy/tobari
+    maintainer: goccy
+    description: Scoped coverage measurement tool for Go
+    license: MIT
+    formats:
+      - deb
+      - rpm
+      - apk
+    bindir: /usr/bin
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  prerelease: auto

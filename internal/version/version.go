@@ -12,6 +12,11 @@ import (
 	"strings"
 )
 
+// ver is set at build time via ldflags:
+//
+//	-X github.com/goccy/tobari/internal/version.ver=v0.1.0
+var ver string
+
 type Version struct {
 	Ver       string
 	LocalPath string
@@ -31,6 +36,10 @@ func Get() (*Version, error) {
 	root := repoRoot()
 	if _, err := os.Stat(root); err == nil {
 		return &Version{LocalPath: root}, nil
+	}
+
+	if ver != "" {
+		return &Version{Ver: ver}, nil
 	}
 
 	buildInfo, ok := debug.ReadBuildInfo()
