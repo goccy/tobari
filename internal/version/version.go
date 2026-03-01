@@ -10,7 +10,14 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+
+	"golang.org/x/mod/module"
 )
+
+// ver is set at build time via ldflags:
+//
+//	-X github.com/goccy/tobari/internal/version.ver=v0.1.0
+var ver string
 
 type Version struct {
 	Ver       string
@@ -28,19 +35,32 @@ func (v *Version) ID() string {
 
 // Get determines the version of tobari binary being used.
 func Get() (*Version, error) {
+	if ver != "" {
+		return &Version{Ver: ver}, nil
+	}
+
+	// Prefer tagged/release version when available ( e.g. `go install ...@vX.Y.Z` ),
+	// even if compile-time source path still exists on disk ( module cache ).
+	// Exclude pseudo-versions (e.g. v0.0.0-20260228130905-0bb47f48a0ec) which
+	// Go 1.25+ stamps into Main.Version for VCS-tracked main-module builds.
+	buildInfo, ok := debug.ReadBuildInfo()
+	if ok && buildInfo.Main.Version != "" &&
+		!strings.Contains(buildInfo.Main.Version, "devel") &&
+		!module.IsPseudoVersion(strings.TrimSuffix(buildInfo.Main.Version, "+dirty")) {
+		return &Version{Ver: buildInfo.Main.Version}, nil
+	}
+
 	root := repoRoot()
 	if _, err := os.Stat(root); err == nil {
 		return &Version{LocalPath: root}, nil
 	}
 
-	buildInfo, ok := debug.ReadBuildInfo()
 	if !ok {
 		return nil, fmt.Errorf("failed to read build info")
 	}
 	if strings.Contains(buildInfo.Main.Version, "devel") {
 		return &Version{Ver: "main"}, nil
 	}
-
 	if buildInfo.Main.Version != "" {
 		return &Version{Ver: buildInfo.Main.Version}, nil
 	}
