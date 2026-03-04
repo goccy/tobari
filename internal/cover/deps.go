@@ -82,6 +82,27 @@ func createFunctionDependencyMap(pkgcfg *PackageConfig, path string) (*FunctionD
 		}
 	}
 
+	// Add functions/methods missing from the call graph.
+	// This handles generic (parameterized) types whose methods are not
+	// included by ssautil.AllFunctions, as well as any other unreachable
+	// functions that still appear in the source AST.
+	for _, member := range targetPkg.Members {
+		switch m := member.(type) {
+		case *ssa.Function:
+			addMissingFunc(prog, m, depMap, funcNames)
+		case *ssa.Type:
+			named, ok := m.Type().(*types.Named)
+			if !ok {
+				continue
+			}
+			for method := range named.Methods() {
+				if ssaFn := prog.FuncValue(method); ssaFn != nil {
+					addMissingFunc(prog, ssaFn, depMap, funcNames)
+				}
+			}
+		}
+	}
+
 	return &FunctionDependency{
 		PkgPath:    targetPkg.Pkg.Path(),
 		DepMap:     depMap,
@@ -146,6 +167,33 @@ func getSSAProgram(pkgcfg *PackageConfig, path string) (*ssa.Program, *ssa.Packa
 	prog.Build()
 
 	return prog, targetPkg, pkgs, nil
+}
+
+func addMissingFunc(prog *ssa.Program, fn *ssa.Function, depMap map[string][]string, funcNames map[funcPos]string) {
+	if _, exists := depMap[fn.String()]; exists {
+		return
+	}
+	depMap[fn.String()] = nil
+	if fn.Pos().IsValid() {
+		pos := prog.Fset.Position(fn.Pos())
+		funcNames[funcPos{
+			Filename: filepath.Clean(pos.Filename),
+			Offset:   pos.Offset,
+		}] = fn.String()
+	}
+	for _, anon := range fn.AnonFuncs {
+		if _, exists := depMap[anon.String()]; exists {
+			continue
+		}
+		depMap[anon.String()] = nil
+		if anon.Pos().IsValid() {
+			pos := prog.Fset.Position(anon.Pos())
+			funcNames[funcPos{
+				Filename: filepath.Clean(pos.Filename),
+				Offset:   pos.Offset,
+			}] = anon.String()
+		}
+	}
 }
 
 func analyzeFuncDeps(targetPkg *ssa.Package, n *callgraph.Node) []string {
