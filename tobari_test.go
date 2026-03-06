@@ -202,6 +202,12 @@ func TestCacheBehavior(t *testing.T) {
 			runDir:   "testdata/generic",
 			hasTest:  true,
 		},
+		{
+			name:     "crosspkg",
+			flagsDir: "testdata/crosspkg",
+			runDir:   "testdata/crosspkg",
+			hasTest:  true,
+		},
 	}
 
 	goFlagsEnv := func(tobariFlags []string) []string {

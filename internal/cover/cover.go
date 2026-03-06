@@ -10,6 +10,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -19,9 +21,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/goccy/tobari/internal/tobari"
+	"github.com/goccy/tobari/internal/utils"
 )
 
 func Run(ctx context.Context, args []string, embedCode bool) error {
@@ -69,15 +73,42 @@ func Run(ctx context.Context, args []string, embedCode bool) error {
 	// but the target files in this case are temporary files written under the $WORK directory.
 	// As a result, there is no go.mod file present, and the files cannot be built correctly.
 	// Consequently, a dependency map cannot be created, so the generation process is skipped altogether.
-	if opt.mode != "testmain" {
-		dep, err := createFunctionDependencyMap(pkgcfg, inputFiles[0])
+	if opt.mode == "testmain" {
+		if err := addTobariImportToTestMain(inputFiles[0]); err != nil {
+			return err
+		}
+	} else if pkgcfg.PkgName == "main" {
+		// Main package: perform whole-program SSA analysis for all coverage-target packages.
+		coverPkgs, err := readCoverPkgs()
+		if err != nil {
+			return err
+		}
+		if len(coverPkgs) > 0 {
+			suppDeps, err := CreateWholeProgDeps(inputFiles[0], coverPkgs)
+			if err != nil {
+				return err
+			}
+			if err := writeSuppDeps(suppDeps, opt.pkgcfg); err != nil {
+				return err
+			}
+		}
+		// Also build lightweight func info for main itself.
+		dep, err := createLightweightFuncInfo(pkgcfg, inputFiles[0])
 		if err != nil {
 			return err
 		}
 		depMap = dep
 	} else {
-		if err := addTobariImportToTestMain(inputFiles[0]); err != nil {
+		// Non-main package: lightweight analysis (no SSA), record package path for later.
+		dep, err := createLightweightFuncInfo(pkgcfg, inputFiles[0])
+		if err != nil {
 			return err
+		}
+		depMap = dep
+		if pkgcfg.PkgPath != "" {
+			if err := recordCoverPkg(pkgcfg.PkgPath); err != nil {
+				return err
+			}
 		}
 	}
 	if len(inputFiles) == 1 && opt.output != "" {
@@ -1147,4 +1178,74 @@ func (b *Buffer) Bytes() []byte {
 	}
 
 	return result
+}
+
+// recordCoverPkg writes the package path to a per-process temp directory so that
+// the main package's cover.Run can discover all coverage-target packages.
+func recordCoverPkg(pkgPath string) error {
+	dir := filepath.Join(utils.TobariTempDir(), "coverpkgs", strconv.Itoa(os.Getppid()))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	hash := sha256.Sum256([]byte(pkgPath))
+	filename := filepath.Join(dir, hex.EncodeToString(hash[:]))
+	return os.WriteFile(filename, []byte(pkgPath), 0o644)
+}
+
+// readCoverPkgs reads all coverage-target package paths recorded by non-main packages.
+func readCoverPkgs() ([]string, error) {
+	dir := filepath.Join(utils.TobariTempDir(), "coverpkgs", strconv.Itoa(os.Getppid()))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var pkgs []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		pkgs = append(pkgs, string(data))
+	}
+	return pkgs, nil
+}
+
+const suppDepsFileName = "_tobari_suppdeps.json"
+
+// writeSuppDeps writes the supplementary dependency map as JSON next to
+// pkgcfg.txt in the $WORK/bNNN/ directory. This ensures each package gets
+// its own isolated file even during parallel builds.
+func writeSuppDeps(deps map[string][]string, pkgcfgPath string) error {
+	if pkgcfgPath == "" {
+		return nil
+	}
+	data, err := json.Marshal(deps)
+	if err != nil {
+		return err
+	}
+	filename := filepath.Join(filepath.Dir(pkgcfgPath), suppDepsFileName)
+	return os.WriteFile(filename, data, 0o644)
+}
+
+// ReadSuppDeps reads the supplementary dependency map from the same $WORK/bNNN/
+// directory as the importcfg file. Returns empty string if the file does not exist.
+func ReadSuppDeps(importcfgPath string) (string, error) {
+	if importcfgPath == "" {
+		return "", nil
+	}
+	filename := filepath.Join(filepath.Dir(importcfgPath), suppDepsFileName)
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return string(data), nil
 }
