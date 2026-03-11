@@ -53,7 +53,7 @@ func TestRenderPackage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := overlay.RenderPackage(def, files)
+	result, err := overlay.RenderPackage(def, files, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,7 +14,7 @@ jobs:
       - name: setup Go
         uses: actions/setup-go@v4
         with:
-          go-version-file: ./go.mod
+          go-version: '1.25'
       - name: run linters
         run: |
           make lint
@@ -36,3 +36,17 @@ jobs:
     - name: test
       run: |
         make test
+
+  kobuild:
+    name: ko build
+    runs-on: ubuntu-latest
+    steps:
+    - name: checkout
+      uses: actions/checkout@v4
+    - name: setup Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.25'
+    - name: ko build
+      run: |
+        make kobuild

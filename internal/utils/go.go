@@ -97,12 +97,25 @@ func GoModTidy(dir string) error {
 
 // GoListExportMap runs `go list -export -json` for the given packages
 // and returns a map of import path -> export file path.
-func GoListExportMap(pkgs []string) (map[string]string, error) {
+// When toolexec and trimpath are provided, they are passed to `go list`
+// so that the compiled packages use the same build cache entries as the
+// outer build, ensuring matching fingerprints at link time.
+func GoListExportMap(pkgs []string, toolexec string, trimpath bool, race bool) (map[string]string, error) {
 	bin, err := GoBin()
 	if err != nil {
 		return nil, err
 	}
-	args := append([]string{"list", "-export", "-json"}, pkgs...)
+	args := []string{"list", "-export", "-json"}
+	if toolexec != "" {
+		args = append(args, "-toolexec="+toolexec)
+	}
+	if trimpath {
+		args = append(args, "-trimpath")
+	}
+	if race {
+		args = append(args, "-race")
+	}
+	args = append(args, pkgs...)
 	cmd := exec.Command(bin, args...)
 	// Strip GOFLAGS to prevent tobari's -toolexec from being inherited,
 	// which would cause recursive invocations.
@@ -114,15 +127,27 @@ func GoListExportMap(pkgs []string) (map[string]string, error) {
 	return parseGoListExportJSON(out)
 }
 
-// GoListDepsExport runs `go list -deps -export -json` with the given toolexec
-// in the specified directory. It returns all transitive dependencies with their
-// export file paths.
-func GoListDepsExport(dir string, toolexec string, pkg string) (map[string]string, error) {
+// GoListDepsExport runs `go list -deps -export -json` in the specified directory.
+// It strips GOFLAGS and explicitly passes -toolexec to avoid recursive invocations
+// and to ensure the inner build uses exactly the specified toolexec command.
+//
+// When trimpath is true, -trimpath is passed to go list so that Go computes
+// the same -trimpath value and action ID as the outer build. This ensures that
+// the inner build produces standard library packages in the same build cache
+// entries as the outer build, preventing fingerprint mismatches at link time.
+func GoListDepsExport(dir string, toolexec string, trimpath bool, race bool, pkg string) (map[string]string, error) {
 	bin, err := GoBin()
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"list", "-deps", "-export", "-json", "-toolexec=" + toolexec, pkg}
+	args := []string{"list", "-deps", "-export", "-json", "-toolexec=" + toolexec}
+	if trimpath {
+		args = append(args, "-trimpath")
+	}
+	if race {
+		args = append(args, "-race")
+	}
+	args = append(args, pkg)
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
 	cmd.Env = filterGOFLAGSEnvs()

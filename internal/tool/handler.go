@@ -35,7 +35,7 @@ func Handle(ctx context.Context, args []string, embedCode bool) error {
 			return err
 		}
 	case "link":
-		if err := handleLink(ctx, toolPath, toolArgs); err != nil {
+		if err := handleLink(ctx, toolPath, toolArgs, embedCode); err != nil {
 			return err
 		}
 	case "cover":
@@ -83,6 +83,8 @@ func handleVersionFull(ctx context.Context, toolPath string, args []string, embe
 	// - overlayHash: invalidates cache when overlay files change (e.g., Go version update)
 	// - exeHash: invalidates cache when the tobari binary changes (e.g., new tobari release)
 	// - embedCode: separates cache between embed and non-embed builds
+	// Note: trimpath cache separation is handled by Go itself, since -trimpath changes
+	// the compiler args which are already part of Go's cache key.
 	fmt.Printf("%s tobari:%s exe:%s embed:%v\n",
 		strings.TrimSpace(string(org)), overlayHash, exeHash, embedCode)
 	return nil
