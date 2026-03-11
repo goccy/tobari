@@ -12,7 +12,29 @@ import (
 )
 
 func handleCompile(ctx context.Context, toolPath string, args []string, embedCode bool) error {
+	trimpath := hasExplicitTrimpath(args)
 	pkgName := getPkgNameFromArgs(args)
+
+	// Write trimpath markers so the link phase can detect whether the outer
+	// build used -trimpath. The linker never receives -trimpath directly.
+	//
+	// Two markers are written:
+	// 1. Work-dir marker ($WORK/.tobari-trimpath): used within the same build
+	//    (compile and link share the same Go build work directory).
+	// 2. Persistent marker ($TMPDIR/tobari/.trimpath): used when the compile
+	//    phase is cached and the work-dir marker was not written. This is safe
+	//    because switching the -trimpath flag invalidates Go's build cache,
+	//    ensuring compile runs and updates the marker whenever the flag changes.
+	trimpathMarker := filepath.Join(utils.TobariTempDir(), ".trimpath")
+	if trimpath {
+		if workDir := getWorkDirFromImportcfg(args); workDir != "" {
+			_ = os.WriteFile(filepath.Join(workDir, ".tobari-trimpath"), []byte("1"), 0o600)
+		}
+		_ = os.MkdirAll(utils.TobariTempDir(), 0o755)
+		_ = os.WriteFile(trimpathMarker, []byte("1"), 0o600)
+	} else {
+		_ = os.Remove(trimpathMarker)
+	}
 
 	// Check if this package needs overlay
 	if def, ok := overlay.TargetPackages()[pkgName]; ok {
@@ -39,8 +61,15 @@ func handleCompile(ctx context.Context, toolPath string, args []string, embedCod
 		// Add new tobari.go file
 		args = append(args, pkg.Added...)
 
-		// Add missing imports to importcfg
-		if err := addMissingImportsToImportcfg(args, pkg.Imports); err != nil {
+		// Add missing imports to importcfg.
+		// Pass toolexec and trimpath to ensure packages are compiled with the
+		// same build cache entries as the outer build, preventing fingerprint
+		// mismatches at link time.
+		toolexec, err := tobariToolexec(embedCode)
+		if err != nil {
+			return err
+		}
+		if err := addMissingImportsToImportcfg(args, pkg.Imports, toolexec, trimpath); err != nil {
 			return err
 		}
 	}
@@ -63,7 +92,7 @@ func handleCompile(ctx context.Context, toolPath string, args []string, embedCod
 	if err != nil {
 		return err
 	}
-	if err := addTobariPkgsToImportcfgFromCompileOptions(args); err != nil {
+	if err := addTobariPkgsToImportcfgFromCompileOptions(args, embedCode, trimpath); err != nil {
 		return err
 	}
 	runCommand(toolPath, args)
@@ -116,7 +145,7 @@ func generateMainHook(embedCode bool) (string, error) {
 // there may be cases where it doesn't exist in the importcfg as is.
 // In such cases, if the target test uses github.com/goccy/tobari, linking is possible;
 // however, if it doesn't use it, a tobari package must be created dynamically and its path specified.
-func addTobariPkgsToImportcfgFromCompileOptions(args []string) error {
+func addTobariPkgsToImportcfgFromCompileOptions(args []string, embedCode bool, trimpath bool) error {
 	importCfgPath := getImportcfgPathFromArgs(args)
 
 	var goFiles []string
@@ -162,7 +191,7 @@ SEARCH_TOBARI_PKG_END:
 		return nil
 	}
 
-	pkgs, err := getTobariPkgs(args)
+	pkgs, err := getTobariPkgs(args, embedCode, trimpath)
 	if err != nil {
 		return err
 	}
@@ -183,7 +212,9 @@ func getPkgNameFromArgs(args []string) string {
 
 // addMissingImportsToImportcfg adds missing import entries to the importcfg
 // for packages imported by the overlay's tobari.go file.
-func addMissingImportsToImportcfg(args []string, imports []string) error {
+// toolexec and trimpath are passed to GoListExportMap so that packages use
+// the same build cache entries as the outer build.
+func addMissingImportsToImportcfg(args []string, imports []string, toolexec string, trimpath bool) error {
 	importCfgPath := getImportcfgPathFromArgs(args)
 	if importCfgPath == "" {
 		return nil
@@ -213,7 +244,7 @@ func addMissingImportsToImportcfg(args []string, imports []string) error {
 	}
 
 	// Get export paths for missing imports via go list
-	exportPaths, err := utils.GoListExportMap(missingImports)
+	exportPaths, err := utils.GoListExportMap(missingImports, toolexec, trimpath)
 	if err != nil {
 		return fmt.Errorf("failed to get export paths: %w", err)
 	}

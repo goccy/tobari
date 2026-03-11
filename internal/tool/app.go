@@ -13,18 +13,19 @@ import (
 	"github.com/goccy/tobari/internal/version"
 )
 
-func buildPackages(ver *version.Version, lang string) (map[string]string, error) {
+func buildPackages(ver *version.Version, lang string, trimpath bool, embedCode bool) (map[string]string, error) {
 	appDir := appPath(ver)
 	// Skip createApp if the directory was already prepared by a prior toolexec
-	// invocation within the same build (compile and link share the same PPID).
+	// invocation.
 	if _, err := os.Stat(filepath.Join(appDir, "go.sum")); err != nil {
 		if err := createApp(ver, lang); err != nil {
 			return nil, fmt.Errorf("failed to create temp app: %w", err)
 		}
 	}
-	tobariPath, err := os.Executable()
+
+	toolexec, err := tobariToolexec(embedCode)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get tobari binary path: %w", err)
+		return nil, err
 	}
 
 	// Use go list -deps -export with -toolexec=tobari to compile and get export paths
@@ -37,7 +38,9 @@ func buildPackages(ver *version.Version, lang string) (map[string]string, error)
 	// Using Go's build cache paths directly (instead of building separate archives)
 	// guarantees that compile and link steps always reference the same package files,
 	// preventing fingerprint mismatches when Go's build cache replays cached results.
-	pkgs, err := utils.GoListDepsExport(appDir, tobariPath, "github.com/goccy/tobari")
+	// When the outer build uses -trimpath, passing -trimpath here ensures the inner
+	// build produces packages in the same cache entries as the outer build.
+	pkgs, err := utils.GoListDepsExport(appDir, toolexec, trimpath, "github.com/goccy/tobari")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tobari packages: %w", err)
 	}
