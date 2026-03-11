@@ -36,3 +36,17 @@ jobs:
     - name: test
       run: |
         make test
+
+  kobuild:
+    name: ko build
+    runs-on: ubuntu-latest
+    steps:
+    - name: checkout
+      uses: actions/checkout@v4
+    - name: setup Go
+      uses: actions/setup-go@v4
+      with:
+        go-version-file: ./go.mod
+    - name: ko build
+      run: |
+        make kobuild

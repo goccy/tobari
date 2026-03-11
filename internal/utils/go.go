@@ -100,7 +100,7 @@ func GoModTidy(dir string) error {
 // When toolexec and trimpath are provided, they are passed to `go list`
 // so that the compiled packages use the same build cache entries as the
 // outer build, ensuring matching fingerprints at link time.
-func GoListExportMap(pkgs []string, toolexec string, trimpath bool) (map[string]string, error) {
+func GoListExportMap(pkgs []string, toolexec string, trimpath bool, race bool) (map[string]string, error) {
 	bin, err := GoBin()
 	if err != nil {
 		return nil, err
@@ -111,6 +111,9 @@ func GoListExportMap(pkgs []string, toolexec string, trimpath bool) (map[string]
 	}
 	if trimpath {
 		args = append(args, "-trimpath")
+	}
+	if race {
+		args = append(args, "-race")
 	}
 	args = append(args, pkgs...)
 	cmd := exec.Command(bin, args...)
@@ -132,7 +135,7 @@ func GoListExportMap(pkgs []string, toolexec string, trimpath bool) (map[string]
 // the same -trimpath value and action ID as the outer build. This ensures that
 // the inner build produces standard library packages in the same build cache
 // entries as the outer build, preventing fingerprint mismatches at link time.
-func GoListDepsExport(dir string, toolexec string, trimpath bool, pkg string) (map[string]string, error) {
+func GoListDepsExport(dir string, toolexec string, trimpath bool, race bool, pkg string) (map[string]string, error) {
 	bin, err := GoBin()
 	if err != nil {
 		return nil, err
@@ -140,6 +143,9 @@ func GoListDepsExport(dir string, toolexec string, trimpath bool, pkg string) (m
 	args := []string{"list", "-deps", "-export", "-json", "-toolexec=" + toolexec}
 	if trimpath {
 		args = append(args, "-trimpath")
+	}
+	if race {
+		args = append(args, "-race")
 	}
 	args = append(args, pkg)
 	cmd := exec.Command(bin, args...)

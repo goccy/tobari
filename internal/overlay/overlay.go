@@ -152,6 +152,10 @@ func ComputeHash() (string, error) {
 			}
 		}
 
+		// Use default counter mode for hash computation. Go's build cache
+		// already separates race/non-race builds via compiler args, so using
+		// a fixed default here is correct.
+		pkgScopedReplacedNameMap["counterMode"] = "set"
 		b, err := evalTemplate(def.Template, pkgScopedReplacedNameMap)
 		if err != nil {
 			return "", err
@@ -181,7 +185,7 @@ func ComputeHash() (string, error) {
 // It parses each source file, renames target functions, renders the template,
 // and writes all files to a content-hash-based directory to ensure deterministic
 // paths across parent and child builds.
-func RenderPackage(def *Definition, sourceFiles []string) (*PackageOverlay, error) {
+func RenderPackage(def *Definition, sourceFiles []string, templateVars map[string]string) (*PackageOverlay, error) {
 	// First pass: render everything in memory
 	type renderedFile struct {
 		origPath string
@@ -229,6 +233,11 @@ func RenderPackage(def *Definition, sourceFiles []string) (*PackageOverlay, erro
 				content:  buf.Bytes(),
 			})
 		}
+	}
+
+	// Merge extra template vars into the name map
+	for k, v := range templateVars {
+		pkgScopedReplacedNameMap[k] = v
 	}
 
 	// Render template

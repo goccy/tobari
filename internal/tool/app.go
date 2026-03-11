@@ -13,7 +13,7 @@ import (
 	"github.com/goccy/tobari/internal/version"
 )
 
-func buildPackages(ver *version.Version, lang string, trimpath bool, embedCode bool) (map[string]string, error) {
+func buildPackages(ver *version.Version, lang string, trimpath bool, race bool, embedCode bool) (map[string]string, error) {
 	appDir := appPath(ver)
 	// Skip createApp if the directory was already prepared by a prior toolexec
 	// invocation.
@@ -40,7 +40,7 @@ func buildPackages(ver *version.Version, lang string, trimpath bool, embedCode b
 	// preventing fingerprint mismatches when Go's build cache replays cached results.
 	// When the outer build uses -trimpath, passing -trimpath here ensures the inner
 	// build produces packages in the same cache entries as the outer build.
-	pkgs, err := utils.GoListDepsExport(appDir, toolexec, trimpath, "github.com/goccy/tobari")
+	pkgs, err := utils.GoListDepsExport(appDir, toolexec, trimpath, race, "github.com/goccy/tobari")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tobari packages: %w", err)
 	}

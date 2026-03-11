@@ -3,7 +3,6 @@ package tool
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/goccy/tobari/internal/version"
@@ -20,12 +19,12 @@ func tobariToolexec(embedCode bool) (string, error) {
 	return tobariPath, nil
 }
 
-func getTobariPkgs(args []string, embedCode bool, trimpath bool) (map[string]string, error) {
+func getTobariPkgs(args []string, embedCode bool, trimpath bool, race bool) (map[string]string, error) {
 	ver, err := version.Get()
 	if err != nil {
 		return nil, err
 	}
-	pkgs, err := buildPackages(ver, getLangFromArgs(args), trimpath, embedCode)
+	pkgs, err := buildPackages(ver, getLangFromArgs(args), trimpath, race, embedCode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build temp module: %w", err)
 	}
@@ -41,20 +40,6 @@ func getImportcfgPathFromArgs(args []string) string {
 	return ""
 }
 
-// getWorkDirFromImportcfg extracts the Go build work directory from the
-// importcfg path. Both compile and link importcfg paths use actual
-// filesystem paths (Go replaces $WORK in display output only, not in args).
-//
-//	compile: $workDir/bNNN/importcfg → $workDir
-//	link:    $workDir/b001/importcfg.link → $workDir
-func getWorkDirFromImportcfg(args []string) string {
-	importCfgPath := getImportcfgPathFromArgs(args)
-	if importCfgPath == "" {
-		return ""
-	}
-	return filepath.Dir(filepath.Dir(importCfgPath))
-}
-
 // hasExplicitTrimpath detects whether the user has passed -trimpath to go build/test.
 // The Go compiler always receives a -trimpath flag with a single directory for internal
 // normalization. When the user explicitly passes -trimpath, the value contains
@@ -62,6 +47,17 @@ func getWorkDirFromImportcfg(args []string) string {
 func hasExplicitTrimpath(args []string) bool {
 	for i, arg := range args {
 		if arg == "-trimpath" && i+1 < len(args) && strings.Contains(args[i+1], ";") {
+			return true
+		}
+	}
+	return false
+}
+
+// hasRaceFlag detects whether the outer build is using -race.
+// When `go build -race` or `go test -race` is used, Go passes -race to the compiler.
+func hasRaceFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "-race" {
 			return true
 		}
 	}
