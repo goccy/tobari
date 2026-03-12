@@ -458,6 +458,67 @@ func TestRace(t *testing.T) {
 	}
 }
 
+// TestTags verifies that tobari works correctly with `-tags`.
+//
+// Background:
+// When `go build -tags timetzdata` or `go test -tags timetzdata` is used,
+// the Go toolchain compiles standard library packages (e.g., time) with
+// different source files. Unlike -trimpath and -race, -tags is resolved by
+// the `go` command before invoking the compiler, so tobari cannot auto-detect
+// it from compiler arguments. Instead, the user specifies -tags via
+// `tobari flags -tags=VALUE`, which outputs both -tags (for go build) and
+// --build-tags (for tobari's toolexec) in GOFLAGS. tobari's inner builds
+// inherit -tags from the filtered GOFLAGS, preventing fingerprint mismatches.
+func TestTags(t *testing.T) {
+	ctx := t.Context()
+	tobariBin := filepath.Join(t.TempDir(), "tobari")
+
+	// Build tobari
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+
+	// Get tobari flags with -tags=timetzdata.
+	// This outputs: -cover -tags=timetzdata '-toolexec=tobari --build-tags=timetzdata'
+	flagsCmd := exec.CommandContext(ctx, tobariBin, "flags", "-tags=timetzdata")
+	flagsCmd.Dir = "testdata/notobari"
+	flagsOut, err := flagsCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("tobari flags failed: %s: %v", string(flagsOut), err)
+	}
+	tobariFlags := strings.TrimSpace(string(flagsOut))
+
+	env := os.Environ()
+	env = append(env, "GOFLAGS="+tobariFlags)
+
+	// Clean go build cache for a fresh start
+	if out, err := exec.CommandContext(ctx, "go", "clean", "-cache").CombinedOutput(); err != nil {
+		t.Fatalf("failed to clean cache: %s: %v", string(out), err)
+	}
+
+	// First run: go test with -tags timetzdata via tobari
+	cmd1 := exec.CommandContext(ctx, "go", "test", ".", "-count=1")
+	cmd1.Env = env
+	cmd1.Dir = "testdata/notobari"
+	if out, err := cmd1.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "fingerprint mismatch") {
+			t.Fatalf("fingerprint mismatch with -tags timetzdata: %s", string(out))
+		}
+		t.Fatalf("first go test -tags timetzdata failed: %s: %v", string(out), err)
+	}
+
+	// Second run: verify cache works with -tags
+	cmd2 := exec.CommandContext(ctx, "go", "test", ".", "-count=1")
+	cmd2.Env = env
+	cmd2.Dir = "testdata/notobari"
+	if out, err := cmd2.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "fingerprint mismatch") {
+			t.Fatalf("fingerprint mismatch on cached -tags timetzdata build: %s", string(out))
+		}
+		t.Fatalf("second go test -tags timetzdata failed: %s: %v", string(out), err)
+	}
+}
+
 func TestEmbedCode(t *testing.T) {
 	ctx := t.Context()
 	tmpDir := t.TempDir()

@@ -15,19 +15,19 @@ import (
 	"github.com/goccy/tobari/internal/overlay"
 )
 
-func Handle(ctx context.Context, args []string, embedCode bool) error {
+func Handle(ctx context.Context, args []string, opts BuildOpts) error {
 	toolPath := args[1]
 	toolArgs := args[2:]
 
 	// Handle -V=full flag to isolate build cache
 	if slices.Contains(toolArgs, "-V=full") {
-		return handleVersionFull(ctx, toolPath, toolArgs, embedCode)
+		return handleVersionFull(ctx, toolPath, toolArgs, opts.EmbedCode)
 	}
 
 	toolName := filepath.Base(toolPath)
 	switch toolName {
 	case "compile":
-		if err := handleCompile(ctx, toolPath, toolArgs, embedCode); err != nil {
+		if err := handleCompile(ctx, toolPath, toolArgs, opts); err != nil {
 			return err
 		}
 	case "vet":
@@ -35,11 +35,11 @@ func Handle(ctx context.Context, args []string, embedCode bool) error {
 			return err
 		}
 	case "link":
-		if err := handleLink(ctx, toolPath, toolArgs, embedCode); err != nil {
+		if err := handleLink(ctx, toolPath, toolArgs, opts); err != nil {
 			return err
 		}
 	case "cover":
-		if err := handleCover(ctx, toolPath, toolArgs, embedCode); err != nil {
+		if err := handleCover(ctx, toolPath, toolArgs, opts.EmbedCode); err != nil {
 			return err
 		}
 	default:
@@ -85,6 +85,8 @@ func handleVersionFull(ctx context.Context, toolPath string, args []string, embe
 	// - embedCode: separates cache between embed and non-embed builds
 	// Note: trimpath cache separation is handled by Go itself, since -trimpath changes
 	// the compiler args which are already part of Go's cache key.
+	// Note: -tags cache separation is handled by Go itself, since tags change the set
+	// of source files which are already part of Go's cache key.
 	fmt.Printf("%s tobari:%s exe:%s embed:%v\n",
 		strings.TrimSpace(string(org)), overlayHash, exeHash, embedCode)
 	return nil

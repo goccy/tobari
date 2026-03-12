@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/goccy/tobari/internal/tool"
 )
@@ -33,13 +34,23 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 
 	tobariBinPath := args[0]
 
-	// Detect --embed-code flag for toolexec mode
-	// When invoked as: tobari --embed-code /path/to/compile <args>
+	// Parse tobari-specific flags before the tool path.
+	// When invoked as: tobari [--embed-code] [--build-tags=VALUE] /path/to/compile <args>
 	embedCode := false
-	if len(args) > 1 && args[1] == "--embed-code" {
-		embedCode = true
-		args = append(args[:1], args[2:]...) // remove --embed-code
+	buildTags := ""
+	i := 1
+	for i < len(args) {
+		if args[i] == "--embed-code" {
+			embedCode = true
+			i++
+		} else if strings.HasPrefix(args[i], "--build-tags=") {
+			buildTags = strings.TrimPrefix(args[i], "--build-tags=")
+			i++
+		} else {
+			break
+		}
 	}
+	args = append(args[:1], args[i:]...) // remove consumed flags
 
 	if len(args) < 2 {
 		return c.showHelp()
@@ -50,7 +61,10 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 	// Check if this is a toolexec call
 	// toolexec passes Go tool's absolute path as args[1]
 	if isToolexecCall(arg1) {
-		return tool.Handle(ctx, args, embedCode)
+		return tool.Handle(ctx, args, tool.BuildOpts{
+			EmbedCode: embedCode,
+			BuildTags: buildTags,
+		})
 	}
 
 	// Handle flags (starts with "-")
