@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-func Run(ctx context.Context, tobariBinPath string, embedCode bool) (string, error) {
+func Run(ctx context.Context, tobariBinPath string, embedCode bool, tags string) (string, error) {
 	path, err := exec.LookPath(tobariBinPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to find tobari binary path from %s: %w", tobariBinPath, err)
@@ -22,15 +22,20 @@ func Run(ctx context.Context, tobariBinPath string, embedCode bool) (string, err
 	}
 	toolexecValue := path
 	if embedCode {
-		toolexecValue = path + " --embed-code"
+		toolexecValue += " --embed-code"
+	}
+	if tags != "" {
+		toolexecValue += " --build-tags=" + tags
 	}
 	toolexecFlag := "-toolexec=" + toolexecValue
 	if strings.Contains(toolexecValue, " ") {
 		// Quote for GOFLAGS which uses SplitQuotedFields
 		toolexecFlag = "'-toolexec=" + toolexecValue + "'"
 	}
-	return strings.Join([]string{
-		"-cover",
-		toolexecFlag,
-	}, " "), nil
+	parts := []string{"-cover"}
+	if tags != "" {
+		parts = append(parts, "-tags="+tags)
+	}
+	parts = append(parts, toolexecFlag)
+	return strings.Join(parts, " "), nil
 }

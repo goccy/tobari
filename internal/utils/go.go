@@ -95,26 +95,43 @@ func GoModTidy(dir string) error {
 	return nil
 }
 
+// GoListOpts bundles options for go list invocations.
+type GoListOpts struct {
+	Toolexec  string
+	Trimpath  bool
+	Race      bool
+	BuildTags string
+}
+
+// goListArgs returns the common flags derived from the options.
+func (o GoListOpts) goListArgs() []string {
+	var args []string
+	if o.Toolexec != "" {
+		args = append(args, "-toolexec="+o.Toolexec)
+	}
+	if o.Trimpath {
+		args = append(args, "-trimpath")
+	}
+	if o.Race {
+		args = append(args, "-race")
+	}
+	if o.BuildTags != "" {
+		args = append(args, "-tags="+o.BuildTags)
+	}
+	return args
+}
+
 // GoListExportMap runs `go list -export -json` for the given packages
 // and returns a map of import path -> export file path.
 // When toolexec and trimpath are provided, they are passed to `go list`
 // so that the compiled packages use the same build cache entries as the
 // outer build, ensuring matching fingerprints at link time.
-func GoListExportMap(pkgs []string, toolexec string, trimpath bool, race bool) (map[string]string, error) {
+func GoListExportMap(pkgs []string, opts GoListOpts) (map[string]string, error) {
 	bin, err := GoBin()
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"list", "-export", "-json"}
-	if toolexec != "" {
-		args = append(args, "-toolexec="+toolexec)
-	}
-	if trimpath {
-		args = append(args, "-trimpath")
-	}
-	if race {
-		args = append(args, "-race")
-	}
+	args := append([]string{"list", "-export", "-json"}, opts.goListArgs()...)
 	args = append(args, pkgs...)
 	cmd := exec.Command(bin, args...)
 	// Strip GOFLAGS to prevent tobari's -toolexec from being inherited,
@@ -135,18 +152,12 @@ func GoListExportMap(pkgs []string, toolexec string, trimpath bool, race bool) (
 // the same -trimpath value and action ID as the outer build. This ensures that
 // the inner build produces standard library packages in the same build cache
 // entries as the outer build, preventing fingerprint mismatches at link time.
-func GoListDepsExport(dir string, toolexec string, trimpath bool, race bool, pkg string) (map[string]string, error) {
+func GoListDepsExport(dir string, opts GoListOpts, pkg string) (map[string]string, error) {
 	bin, err := GoBin()
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"list", "-deps", "-export", "-json", "-toolexec=" + toolexec}
-	if trimpath {
-		args = append(args, "-trimpath")
-	}
-	if race {
-		args = append(args, "-race")
-	}
+	args := append([]string{"list", "-deps", "-export", "-json"}, opts.goListArgs()...)
 	args = append(args, pkg)
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
@@ -176,7 +187,10 @@ func parseGoListExportJSON(data []byte) (map[string]string, error) {
 	return ret, nil
 }
 
-// envs stripped GOFLAGS to prevent -cover/-toolexec.
+// filterGOFLAGSEnvs strips GOFLAGS to prevent -cover/-toolexec from being
+// inherited by inner go list invocations, which would cause recursive
+// invocations and double coverage instrumentation. Build tags and other
+// flags are passed explicitly via function parameters instead.
 func filterGOFLAGSEnvs() []string {
 	envs := os.Environ()
 	newEnvs := make([]string, 0, len(envs))

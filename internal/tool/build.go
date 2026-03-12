@@ -8,23 +8,27 @@ import (
 	"github.com/goccy/tobari/internal/version"
 )
 
-func tobariToolexec(embedCode bool) (string, error) {
+func tobariToolexec(opts BuildOpts) (string, error) {
 	tobariPath, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("failed to get tobari binary path: %w", err)
 	}
-	if embedCode {
-		return tobariPath + " --embed-code", nil
+	v := tobariPath
+	if opts.EmbedCode {
+		v += " --embed-code"
 	}
-	return tobariPath, nil
+	if opts.BuildTags != "" {
+		v += " --build-tags=" + opts.BuildTags
+	}
+	return v, nil
 }
 
-func getTobariPkgs(args []string, embedCode bool, trimpath bool, race bool) (map[string]string, error) {
+func getTobariPkgs(args []string, opts BuildOpts) (map[string]string, error) {
 	ver, err := version.Get()
 	if err != nil {
 		return nil, err
 	}
-	pkgs, err := buildPackages(ver, getLangFromArgs(args), trimpath, race, embedCode)
+	pkgs, err := buildPackages(ver, getLangFromArgs(args), opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build temp module: %w", err)
 	}
