@@ -88,7 +88,7 @@ func Run(ctx context.Context, args []string, embedCode bool) error {
 			if err != nil {
 				return err
 			}
-			if err := writeSuppDeps(suppDeps, opt.pkgcfg); err != nil {
+			if err := writeSuppDeps(suppDeps); err != nil {
 				return err
 			}
 		}
@@ -498,17 +498,14 @@ func (f *File) renderMetadata() (string, error) {
 			Deps:   deps,
 		})
 	}
-	b, err := json.Marshal(&tobari.Metadata{
+	encoded := tobari.MarshalMetadata(&tobari.Metadata{
 		FileName:   f.name,
 		PkgPath:    f.pkgcfg.PkgPath,
 		PkgName:    f.pkgcfg.PkgName,
 		ModulePath: f.pkgcfg.ModulePath,
 		Funcs:      funcs,
 	})
-	if err != nil {
-		return "", fmt.Errorf("failed to encode tobari's metadata: %w", err)
-	}
-	return string(b), nil
+	return encoded, nil
 }
 
 func (f *File) offset(pos token.Pos) int {
@@ -1221,25 +1218,23 @@ const suppDepsFileName = "_tobari_suppdeps.json"
 // writeSuppDeps writes the supplementary dependency map as JSON next to
 // pkgcfg.txt in the $WORK/bNNN/ directory. This ensures each package gets
 // its own isolated file even during parallel builds.
-func writeSuppDeps(deps map[string][]string, pkgcfgPath string) error {
-	if pkgcfgPath == "" {
-		return nil
-	}
+func writeSuppDeps(deps map[string][]string) error {
 	data, err := json.Marshal(deps)
 	if err != nil {
 		return err
 	}
-	filename := filepath.Join(filepath.Dir(pkgcfgPath), suppDepsFileName)
+	dir := filepath.Join(utils.TobariTempDir(), "suppdeps", strconv.Itoa(os.Getppid()))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	filename := filepath.Join(dir, suppDepsFileName)
 	return os.WriteFile(filename, data, 0o644)
 }
 
-// ReadSuppDeps reads the supplementary dependency map from the same $WORK/bNNN/
-// directory as the importcfg file. Returns empty string if the file does not exist.
-func ReadSuppDeps(importcfgPath string) (string, error) {
-	if importcfgPath == "" {
-		return "", nil
-	}
-	filename := filepath.Join(filepath.Dir(importcfgPath), suppDepsFileName)
+// ReadSuppDeps reads the supplementary dependency map from the shared temp directory.
+// Returns empty string if the file does not exist.
+func ReadSuppDeps() (string, error) {
+	filename := filepath.Join(utils.TobariTempDir(), "suppdeps", strconv.Itoa(os.Getppid()), suppDepsFileName)
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		if os.IsNotExist(err) {

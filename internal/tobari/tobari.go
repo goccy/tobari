@@ -505,6 +505,186 @@ type Block struct {
 	Function *Function `json:"-"`
 }
 
+// MarshalMetadata encodes Metadata into a simple line-based text format.
+// This avoids encoding/json so that the result can be decoded in package init
+// functions without requiring encoding/json to be initialized first.
+// Format: lines separated by \n, fields separated by \t
+//
+//	H\tFileName\tPkgPath\tPkgName\tModulePath  (header)
+//	F\tName\tLit                                (function)
+//	B\tIdx\tStartLine\tStartCol\tEndLine\tEndCol\tNumStmts  (block)
+//	D\tDepName                                  (dependency)
+func MarshalMetadata(md *Metadata) string {
+	var b strings.Builder
+	b.WriteString("H\t")
+	b.WriteString(md.FileName)
+	b.WriteByte('\t')
+	b.WriteString(md.PkgPath)
+	b.WriteByte('\t')
+	b.WriteString(md.PkgName)
+	b.WriteByte('\t')
+	b.WriteString(md.ModulePath)
+	b.WriteByte('\n')
+
+	for _, fn := range md.Funcs {
+		b.WriteString("F\t")
+		b.WriteString(fn.Name)
+		b.WriteByte('\t')
+		if fn.Lit {
+			b.WriteString("1")
+		} else {
+			b.WriteString("0")
+		}
+		b.WriteByte('\n')
+
+		for _, blk := range fn.Blocks {
+			b.WriteString("B\t")
+			writeInt(&b, blk.Idx)
+			b.WriteByte('\t')
+			writeInt(&b, blk.Start.Line)
+			b.WriteByte('\t')
+			writeInt(&b, blk.Start.Col)
+			b.WriteByte('\t')
+			writeInt(&b, blk.End.Line)
+			b.WriteByte('\t')
+			writeInt(&b, blk.End.Col)
+			b.WriteByte('\t')
+			writeInt(&b, blk.NumStmts)
+			b.WriteByte('\n')
+		}
+
+		for _, dep := range fn.Deps {
+			b.WriteString("D\t")
+			b.WriteString(dep)
+			b.WriteByte('\n')
+		}
+	}
+
+	return b.String()
+}
+
+// writeInt writes an integer to the builder without using strconv.
+func writeInt(b *strings.Builder, n int) {
+	if n == 0 {
+		b.WriteByte('0')
+		return
+	}
+	if n < 0 {
+		b.WriteByte('-')
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	b.Write(buf[i:])
+}
+
+// parseMetadata decodes the line-based text format produced by MarshalMetadata.
+// This function must not depend on encoding/json or any package with complex
+// init functions, as it is called from instrumented packages' init.
+func parseMetadata(s string) Metadata {
+	var md Metadata
+	var curFn *Function
+
+	for len(s) > 0 {
+		nl := indexByte(s, '\n')
+		var line string
+		if nl < 0 {
+			line = s
+			s = ""
+		} else {
+			line = s[:nl]
+			s = s[nl+1:]
+		}
+		if len(line) < 2 || line[1] != '\t' {
+			continue
+		}
+		switch line[0] {
+		case 'H':
+			fields := splitTabs(line[2:], 4)
+			md.FileName = fields[0]
+			md.PkgPath = fields[1]
+			md.PkgName = fields[2]
+			md.ModulePath = fields[3]
+		case 'F':
+			fields := splitTabs(line[2:], 2)
+			curFn = &Function{
+				Name: fields[0],
+				Lit:  fields[1] == "1",
+			}
+			md.Funcs = append(md.Funcs, curFn)
+		case 'B':
+			if curFn == nil {
+				continue
+			}
+			fields := splitTabs(line[2:], 6)
+			curFn.Blocks = append(curFn.Blocks, &Block{
+				Idx:      parseInt(fields[0]),
+				Start:    Pos{Line: parseInt(fields[1]), Col: parseInt(fields[2])},
+				End:      Pos{Line: parseInt(fields[3]), Col: parseInt(fields[4])},
+				NumStmts: parseInt(fields[5]),
+			})
+		case 'D':
+			if curFn == nil {
+				continue
+			}
+			curFn.Deps = append(curFn.Deps, line[2:])
+		}
+	}
+
+	return md
+}
+
+// indexByte returns the index of the first occurrence of c in s, or -1.
+func indexByte(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// splitTabs splits s by tab into exactly n fields.
+func splitTabs(s string, n int) []string {
+	fields := make([]string, n)
+	for i := 0; i < n-1; i++ {
+		tab := indexByte(s, '\t')
+		if tab < 0 {
+			fields[i] = s
+			return fields
+		}
+		fields[i] = s[:tab]
+		s = s[tab+1:]
+	}
+	fields[n-1] = s
+	return fields
+}
+
+// parseInt parses a decimal integer from s without using strconv.
+func parseInt(s string) int {
+	if len(s) == 0 {
+		return 0
+	}
+	neg := false
+	if s[0] == '-' {
+		neg = true
+		s = s[1:]
+	}
+	n := 0
+	for i := 0; i < len(s); i++ {
+		n = n*10 + int(s[i]-'0')
+	}
+	if neg {
+		return -n
+	}
+	return n
+}
+
 var initOnce sync.Once
 
 func init() {
@@ -561,10 +741,7 @@ func AddSupplementaryDeps(jsonData string) bool {
 
 func AddCoverMeta(s string) bool {
 	initMap()
-	var md Metadata
-	if err := json.Unmarshal([]byte(s), &md); err != nil {
-		panic(err)
-	}
+	md := parseMetadata(s)
 	allCoverprofileMapMu.Lock()
 
 	funcMapMu.Lock()

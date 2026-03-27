@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -159,12 +160,14 @@ func TestCacheBehavior(t *testing.T) {
 	}
 
 	type app struct {
-		name     string
-		flagsDir string   // directory for tobari flags (empty = project root)
-		runDir   string   // directory for go run/test (empty = project root)
-		runArgs  []string // extra args for go run after flags
-		hasTest  bool     // supports go test
-		cleanup  []string // files to remove after go run
+		name         string
+		flagsDir     string   // directory for tobari flags (empty = project root)
+		runDir       string   // directory for go run/test (empty = project root)
+		runArgs      []string // extra args for go run after flags
+		testArgs     []string // extra args for go test
+		hasTest      bool     // supports go test
+		cleanup      []string // files to remove after go run
+		expectedJSON string   // path to expected tobari.json (relative to runDir)
 	}
 
 	apps := []app{
@@ -203,10 +206,12 @@ func TestCacheBehavior(t *testing.T) {
 			hasTest:  true,
 		},
 		{
-			name:     "crosspkg",
-			flagsDir: "testdata/crosspkg",
-			runDir:   "testdata/crosspkg",
-			hasTest:  true,
+			name:         "crosspkg",
+			flagsDir:     "testdata/crosspkg",
+			runDir:       "testdata/crosspkg",
+			testArgs:     []string{"-coverpkg=example.com/..."},
+			hasTest:      true,
+			expectedJSON: "expected_tobari.json",
 		},
 	}
 
@@ -229,7 +234,8 @@ func TestCacheBehavior(t *testing.T) {
 
 	goTest := func(t *testing.T, a app, tobariFlags []string) {
 		t.Helper()
-		cmd := exec.CommandContext(ctx, "go", "test", ".", "-count=1")
+		args := append([]string{"test", ".", "-count=1"}, a.testArgs...)
+		cmd := exec.CommandContext(ctx, "go", args...)
 		cmd.Env = goFlagsEnv(tobariFlags)
 		if a.runDir != "" {
 			cmd.Dir = a.runDir
@@ -276,9 +282,65 @@ func TestCacheBehavior(t *testing.T) {
 							goTest(t, a, tobariFlags)
 						})
 					}
+					if a.expectedJSON != "" {
+						t.Run("tobari_json", func(t *testing.T) {
+							compareTobariJSON(t, a.runDir, a.expectedJSON)
+						})
+					}
 				})
 			}
 		})
+	}
+}
+
+// compareTobariJSON compares the generated tobari/tobari.json against an expected golden file.
+// File paths in metadata.files are normalized to be relative to the test directory
+// so the comparison is machine-independent.
+func compareTobariJSON(t *testing.T, runDir, expectedFile string) {
+	t.Helper()
+
+	type tobariJSON struct {
+		Metadata struct {
+			Files []string `json:"files"`
+			Entry []string `json:"entry"`
+			All   [][]int  `json:"all"`
+		} `json:"metadata"`
+		Counts []struct {
+			Name         string  `json:"name"`
+			Coverprofile [][]int `json:"coverprofile"`
+		} `json:"counts"`
+		AllCounts []int `json:"allcounts"`
+	}
+
+	readJSON := func(path string) tobariJSON {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", path, err)
+		}
+		var v tobariJSON
+		if err := json.Unmarshal(data, &v); err != nil {
+			t.Fatalf("failed to parse %s: %v", path, err)
+		}
+		return v
+	}
+
+	actual := readJSON(filepath.Join(runDir, "tobari", "tobari.json"))
+	expected := readJSON(filepath.Join(runDir, expectedFile))
+
+	// Normalize absolute file paths to relative paths.
+	absDir, err := filepath.Abs(runDir)
+	if err != nil {
+		t.Fatalf("failed to get abs path: %v", err)
+	}
+	for i, f := range actual.Metadata.Files {
+		if rel, err := filepath.Rel(absDir, f); err == nil {
+			actual.Metadata.Files[i] = rel
+		}
+	}
+
+	if diff := cmp.Diff(expected, actual); diff != "" {
+		t.Errorf("tobari.json mismatch (-expected +actual):\n%s", diff)
 	}
 }
 

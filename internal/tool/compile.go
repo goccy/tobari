@@ -53,8 +53,7 @@ func handleCompile(ctx context.Context, toolPath string, args []string, embedCod
 	// tobari would fail with relocation errors at link time.
 	// When embed-code is enabled, also inject the source extraction hook.
 	if pkgName == "main" {
-		importcfgPath := getImportcfgPathFromArgs(args)
-		suppDeps, err := cover.ReadSuppDeps(importcfgPath)
+		suppDeps, err := cover.ReadSuppDeps()
 		if err != nil {
 			return fmt.Errorf("failed to read supplementary deps: %w", err)
 		}

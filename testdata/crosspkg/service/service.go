@@ -57,3 +57,11 @@ func (p *PairProcessor[A, B]) Process(input string) string {
 	_ = p.pair.Swap()
 	return "pair:" + input
 }
+
+// ConditionalProcess calls p.Process only when run is true.
+func ConditionalProcess(p Processor, input string, run bool) string {
+	if run {
+		return p.Process(input)
+	}
+	return ""
+}

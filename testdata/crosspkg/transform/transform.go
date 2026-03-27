@@ -35,3 +35,12 @@ func Compose[A, B, C any](f func(A) B, g func(B) C) func(A) C {
 		return g(f(a))
 	}
 }
+
+// StringProcessor implements service.Processor interface (structurally).
+type StringProcessor struct {
+	Prefix string
+}
+
+func (sp StringProcessor) Process(input string) string {
+	return sp.Prefix + ":" + input
+}
