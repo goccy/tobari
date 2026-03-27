@@ -591,6 +591,88 @@ func writeInt(b *strings.Builder, n int) {
 	b.Write(buf[i:])
 }
 
+// parseMetadata decodes the line-based text format produced by MarshalMetadata.
+// This function must not depend on encoding/json or any package with complex
+// init functions, as it is called from instrumented packages' init.
+func parseMetadata(s string) Metadata {
+	var md Metadata
+	var curFn *Function
+
+	for len(s) > 0 {
+		nl := strings.IndexByte(s, '\n')
+		var line string
+		if nl < 0 {
+			line = s
+			s = ""
+		} else {
+			line = s[:nl]
+			s = s[nl+1:]
+		}
+		if len(line) < 2 || line[1] != '\t' {
+			continue
+		}
+		switch line[0] {
+		case 'H':
+			fields := strings.SplitN(line[2:], "\t", 4)
+			if len(fields) >= 4 {
+				md.FileName = fields[0]
+				md.PkgPath = fields[1]
+				md.PkgName = fields[2]
+				md.ModulePath = fields[3]
+			}
+		case 'F':
+			fields := strings.SplitN(line[2:], "\t", 2)
+			curFn = &Function{
+				Name: fields[0],
+			}
+			if len(fields) >= 2 {
+				curFn.Lit = fields[1] == "1"
+			}
+			md.Funcs = append(md.Funcs, curFn)
+		case 'B':
+			if curFn == nil {
+				continue
+			}
+			fields := strings.SplitN(line[2:], "\t", 6)
+			if len(fields) >= 6 {
+				curFn.Blocks = append(curFn.Blocks, &Block{
+					Idx:      parseInt(fields[0]),
+					Start:    Pos{Line: parseInt(fields[1]), Col: parseInt(fields[2])},
+					End:      Pos{Line: parseInt(fields[3]), Col: parseInt(fields[4])},
+					NumStmts: parseInt(fields[5]),
+				})
+			}
+		case 'D':
+			if curFn == nil {
+				continue
+			}
+			curFn.Deps = append(curFn.Deps, line[2:])
+		}
+	}
+
+	return md
+}
+
+// parseInt parses a decimal integer from s without using strconv.
+func parseInt(s string) int {
+	if len(s) == 0 {
+		return 0
+	}
+	neg := false
+	if s[0] == '-' {
+		neg = true
+		s = s[1:]
+	}
+	n := 0
+	for i := 0; i < len(s); i++ {
+		n = n*10 + int(s[i]-'0')
+	}
+	if neg {
+		return -n
+	}
+	return n
+}
+
 var initOnce sync.Once
 
 func init() {
@@ -661,10 +743,7 @@ func decodeRawMetas() {
 		rawMetasMu.Unlock()
 
 		for _, s := range snapshot {
-			var md Metadata
-			if err := json.Unmarshal([]byte(s), &md); err != nil {
-				panic(err)
-			}
+			md := parseMetadata(s)
 			allCoverprofileMapMu.Lock()
 
 			funcMapMu.Lock()
