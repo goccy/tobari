@@ -131,6 +131,9 @@ Then, when building the application you want to measure coverage for, simply spe
 
 ```console
 GOFLAGS="$(tobari flags)" go build .
+
+# With build tags
+GOFLAGS="$(tobari flags -tags=timetzdata)" go build .
 ```
 
 This example shows distinguishing coverage results by name, but you can also use it the same way as `runtime/coverage`.
@@ -463,33 +466,58 @@ Tobari generates coverage data in two formats:
 
 #### JSON Format (`tobari.json`)
 
-A structured JSON format where each test name maps to an array of coverage entries:
+A compact indexed JSON format. File paths and instrumented blocks are stored once in `metadata`, and per-test coverage data in `counts` references them by index:
 
 ```json
 {
-  "TestAdd": [
-    {
-      "FileName": "/path/to/file.go",
-      "Start": {"Line": 7, "Column": 24},
-      "End": {"Line": 9, "Column": 2},
-      "StatementCount": 1,
-      "Count": 4
-    }
-  ]
+  "metadata": {
+    "files": ["/path/to/file.go"],
+    "entry": ["FileName","StartLine","StartCol","EndLine","EndCol","StatementCount"],
+    "all": [
+      [0, 7, 24, 9, 2, 1],
+      [0, 11, 29, 12, 22, 1],
+      [0, 15, 2, 15, 14, 1],
+      [0, 12, 22, 14, 3, 1]
+    ]
+  },
+  "counts": [
+    {"name": "TestAdd", "coverprofile": [[0, 4]]},
+    {"name": "TestMultiply", "coverprofile": [[1, 5], [2, 3], [3, 2]]}
+  ],
+  "allcounts": [4, 5, 3, 2]
 }
 ```
+
+| Field | Description |
+|-------|-------------|
+| `metadata.files` | List of source file paths |
+| `metadata.entry` | Column header names for `metadata.all` entries |
+| `metadata.all` | All instrumented blocks: `[fileIdx, startLine, startCol, endLine, endCol, numStmts]` |
+| `counts[].name` | Test name (e.g., `TestAdd`, `TestDivide/panic`) |
+| `counts[].coverprofile` | Coverage entries: `[blockIdx, count]` (indices into `metadata.all`) |
+| `allcounts` | Merged counts across all tests, one per block in `metadata.all` |
 
 #### TOON Format (`tobari.toon`)
 
 A compact [Token-Oriented Object Notation](https://github.com/toon-format/toon) format optimized for LLM consumption. TOON uses approximately 40% fewer tokens than JSON while maintaining the same information:
 
 ```
-TestAdd[1]{FileName,StartLine,StartCol,EndLine,EndCol,StatementCount,Count}:
-	/path/to/file.go,7,24,9,2,1,4
-TestMultiply[3]{FileName,StartLine,StartCol,EndLine,EndCol,StatementCount,Count}:
-	/path/to/file.go,11,29,12,22,1,5
-	/path/to/file.go,15,2,15,14,1,3
-	/path/to/file.go,12,22,14,3,1,2
+metadata:
+  files:
+    /path/to/file.go
+  entry: FileName,StartLine,StartCol,EndLine,EndCol,StatementCount
+  all[4]:
+    /path/to/file.go,7,24,9,2,1
+    /path/to/file.go,11,29,12,22,1
+    /path/to/file.go,15,2,15,14,1
+    /path/to/file.go,12,22,14,3,1
+counts:
+  TestAdd[1]{FileName,StartLine,StartCol,EndLine,EndCol,StatementCount,Count}:
+    /path/to/file.go,7,24,9,2,1,4
+  TestMultiply[3]{FileName,StartLine,StartCol,EndLine,EndCol,StatementCount,Count}:
+    /path/to/file.go,11,29,12,22,1,5
+    /path/to/file.go,15,2,15,14,1,3
+    /path/to/file.go,12,22,14,3,1,2
 ```
 
 The TOON format is particularly useful when feeding coverage data to AI coding agents, as it reduces token usage while preserving all necessary information for coverage analysis.
@@ -541,6 +569,126 @@ To implement this functionality, Tobari passes two options during `go build`: `-
 - `-toolexec`: Hooks execution of Go build tools to dynamically add APIs to the runtime package for obtaining GID and PGID (which are not public APIs), and to embed measurement points that include GID and PGID
 
 These options are output by the `tobari flags` command, so they can be added to `go build` options by simply specifying `GOFLAGS=$(tobari flags)`.
+
+# CLI Reference
+
+```
+tobari - Go scoped coverage measurement tool
+
+Usage:
+    tobari <command> [options]
+    tobari [flags]
+```
+
+## Global Flags
+
+| Flag | Description |
+|------|-------------|
+| `-v`, `--version` | Show version information |
+| `-h`, `--help` | Show help message |
+
+## Commands
+
+### `tobari flags`
+
+Output `GOFLAGS` value for `go build` / `go test` with coverage instrumentation.
+
+```console
+tobari flags [--embed-code | -E] [-tags=VALUE]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--embed-code`, `-E` | Embed original source code into the instrumented binary |
+| `-tags=VALUE` | Build tags (same as `go build -tags`) |
+
+**Examples:**
+```console
+# Basic usage
+GOFLAGS="$(tobari flags)" go build .
+
+# With source embedding
+GOFLAGS="$(tobari flags -E)" go build .
+
+# With build tags
+GOFLAGS="$(tobari flags -tags=timetzdata)" go build .
+```
+
+### `tobari extract`
+
+Extract embedded source code from an instrumented binary built with `--embed-code`.
+
+```console
+tobari extract -o <output.tar.gz> <binary>
+```
+
+| Option | Description |
+|--------|-------------|
+| `-o <file>` | Output file path for tar.gz archive (required) |
+
+### `tobari html`
+
+Generate an HTML coverage report from a coverprofile or `tobari.json` file.
+
+```console
+tobari html [-o output.html] [-b binary | -s sources.tar.gz] <tobari.json-or-coverprofile>
+```
+
+| Option | Description |
+|--------|-------------|
+| `-o <file>` | Output HTML file path (default: `cover.html`) |
+| `-b <binary>` | Path to tobari-built binary with embedded sources |
+| `-s <tar.gz>` | Path to tar.gz archive of extracted sources |
+
+When given a `tobari.json` file, generates an interactive HTML report with per-test coverage visualization, overlap analysis, and summary statistics. When given a coverprofile file, generates a standard HTML report using `go tool cover`.
+
+The `-b` and `-s` flags are mutually exclusive.
+
+### `tobari convert`
+
+Convert `tobari.json` to standard coverprofile format.
+
+```console
+tobari convert [-o output.cover] <tobari.json>
+```
+
+| Option | Description |
+|--------|-------------|
+| `-o <file>` | Output coverprofile file path (default: `cover.out`) |
+
+### `tobari merge`
+
+Merge multiple `tobari.json` files or source archives.
+
+```console
+tobari merge json   [-o merged.json]   <file1.json> <file2.json> [...]
+tobari merge source [-o merged.tar.gz] <a.tar.gz> <b.tar.gz> [...]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `json` | Merge multiple `tobari.json` files into one |
+| `source` | Merge multiple source tar.gz archives into one |
+
+| Option | Description |
+|--------|-------------|
+| `-o <file>` | Output file path (default: `merged.json` or `merged.tar.gz`) |
+
+Duplicate source archives (same SHA-256 hash) are skipped. Conflicting files (same path, different content) cause an error.
+
+### `tobari version`
+
+Show version information.
+
+### `tobari help`
+
+Show help message with all commands and options.
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `TOBARI_COVERDIR` | Directory for coverage output files (default: current directory) |
 
 # License
 

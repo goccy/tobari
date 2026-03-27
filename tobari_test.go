@@ -213,6 +213,12 @@ func TestCacheBehavior(t *testing.T) {
 			hasTest:      true,
 			expectedJSON: "expected_tobari.json",
 		},
+		{
+			name:     "initorder",
+			flagsDir: "testdata/initorder",
+			runDir:   "testdata/initorder",
+			runArgs:  []string{"main.go"},
+		},
 	}
 
 	goFlagsEnv := func(tobariFlags []string) []string {
@@ -414,6 +420,176 @@ func TestFingerprintConsistency(t *testing.T) {
 	cmd3.Dir = "testdata/notobari"
 	if out, err := cmd3.CombinedOutput(); err != nil {
 		t.Fatalf("third go test failed: %s: %v", string(out), err)
+	}
+}
+
+// TestTrimpath verifies that tobari works correctly with `-trimpath`.
+//
+// Background:
+// When `go build -trimpath` or `go test -trimpath` is used (e.g., ko build),
+// the inner build (GoListDepsExport) must also use `-trimpath` so that the
+// inner and outer builds produce archives with matching fingerprints.
+// tobari auto-detects -trimpath from compiler args (the value contains ';'
+// when the user passes -trimpath) and propagates it to the inner build.
+func TestTrimpath(t *testing.T) {
+	ctx := t.Context()
+	tobariBin := filepath.Join(t.TempDir(), "tobari")
+
+	// Build tobari
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+
+	// Get tobari flags (trimpath is auto-detected, not a tobari flag)
+	flagsCmd := exec.CommandContext(ctx, tobariBin, "flags")
+	flagsCmd.Dir = "testdata/notobari"
+	flagsOut, err := flagsCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("tobari flags failed: %s: %v", string(flagsOut), err)
+	}
+	tobariFlags := strings.TrimSpace(string(flagsOut))
+
+	env := os.Environ()
+	env = append(env, "GOFLAGS="+tobariFlags)
+
+	// Run with -trimpath passed directly to go test (auto-detected by tobari)
+	cmd1 := exec.CommandContext(ctx, "go", "test", "-trimpath", ".", "-count=1")
+	cmd1.Env = env
+	cmd1.Dir = "testdata/notobari"
+	if out, err := cmd1.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "fingerprint mismatch") {
+			t.Fatalf("fingerprint mismatch with -trimpath: %s", string(out))
+		}
+		t.Fatalf("first go test -trimpath failed: %s: %v", string(out), err)
+	}
+
+	// Second run: verify cache works with -trimpath
+	cmd2 := exec.CommandContext(ctx, "go", "test", "-trimpath", ".", "-count=1")
+	cmd2.Env = env
+	cmd2.Dir = "testdata/notobari"
+	if out, err := cmd2.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "fingerprint mismatch") {
+			t.Fatalf("fingerprint mismatch on cached -trimpath build: %s", string(out))
+		}
+		t.Fatalf("second go test -trimpath failed: %s: %v", string(out), err)
+	}
+}
+
+// TestRace verifies that tobari works correctly with `-race`.
+//
+// Background:
+// When `go test -race` is used, the Go compiler receives `-race` and
+// `-installsuffix race` flags, which change the build cache ID.
+// tobari auto-detects -race from compiler args and propagates it to the
+// inner build (GoListDepsExport) so that both builds produce packages
+// with matching fingerprints.
+func TestRace(t *testing.T) {
+	ctx := t.Context()
+	tobariBin := filepath.Join(t.TempDir(), "tobari")
+
+	// Build tobari
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+
+	// Get tobari flags
+	flagsCmd := exec.CommandContext(ctx, tobariBin, "flags")
+	flagsCmd.Dir = "testdata/notobari"
+	flagsOut, err := flagsCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("tobari flags failed: %s: %v", string(flagsOut), err)
+	}
+	tobariFlags := strings.TrimSpace(string(flagsOut))
+
+	env := os.Environ()
+	env = append(env, "GOFLAGS="+tobariFlags)
+
+	// Clean go build cache for a fresh start
+	if out, err := exec.CommandContext(ctx, "go", "clean", "-cache").CombinedOutput(); err != nil {
+		t.Fatalf("failed to clean cache: %s: %v", string(out), err)
+	}
+
+	// First run: go test -race with tobari
+	cmd1 := exec.CommandContext(ctx, "go", "test", "-race", ".", "-count=1")
+	cmd1.Env = env
+	cmd1.Dir = "testdata/notobari"
+	if out, err := cmd1.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "fingerprint mismatch") {
+			t.Fatalf("fingerprint mismatch with -race: %s", string(out))
+		}
+		t.Fatalf("first go test -race failed: %s: %v", string(out), err)
+	}
+
+	// Second run: verify cache works with -race
+	cmd2 := exec.CommandContext(ctx, "go", "test", "-race", ".", "-count=1")
+	cmd2.Env = env
+	cmd2.Dir = "testdata/notobari"
+	if out, err := cmd2.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "fingerprint mismatch") {
+			t.Fatalf("fingerprint mismatch on cached -race build: %s", string(out))
+		}
+		t.Fatalf("second go test -race failed: %s: %v", string(out), err)
+	}
+}
+
+// TestTags verifies that tobari works correctly with `-tags`.
+//
+// Background:
+// When `go build -tags timetzdata` or `go test -tags timetzdata` is used,
+// the Go toolchain compiles standard library packages (e.g., time) with
+// different source files. Unlike -trimpath and -race, -tags is resolved by
+// the `go` command before invoking the compiler, so tobari cannot auto-detect
+// it from compiler arguments. Instead, the user specifies -tags via
+// `tobari flags -tags=VALUE`, which outputs both -tags (for go build) and
+// --build-tags (for tobari's toolexec) in GOFLAGS. tobari's inner builds
+// inherit -tags from the filtered GOFLAGS, preventing fingerprint mismatches.
+func TestTags(t *testing.T) {
+	ctx := t.Context()
+	tobariBin := filepath.Join(t.TempDir(), "tobari")
+
+	// Build tobari
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+
+	// Get tobari flags with -tags=timetzdata.
+	// This outputs: -cover -tags=timetzdata '-toolexec=tobari --build-tags=timetzdata'
+	flagsCmd := exec.CommandContext(ctx, tobariBin, "flags", "-tags=timetzdata")
+	flagsCmd.Dir = "testdata/notobari"
+	flagsOut, err := flagsCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("tobari flags failed: %s: %v", string(flagsOut), err)
+	}
+	tobariFlags := strings.TrimSpace(string(flagsOut))
+
+	env := os.Environ()
+	env = append(env, "GOFLAGS="+tobariFlags)
+
+	// Clean go build cache for a fresh start
+	if out, err := exec.CommandContext(ctx, "go", "clean", "-cache").CombinedOutput(); err != nil {
+		t.Fatalf("failed to clean cache: %s: %v", string(out), err)
+	}
+
+	// First run: go test with -tags timetzdata via tobari
+	cmd1 := exec.CommandContext(ctx, "go", "test", ".", "-count=1")
+	cmd1.Env = env
+	cmd1.Dir = "testdata/notobari"
+	if out, err := cmd1.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "fingerprint mismatch") {
+			t.Fatalf("fingerprint mismatch with -tags timetzdata: %s", string(out))
+		}
+		t.Fatalf("first go test -tags timetzdata failed: %s: %v", string(out), err)
+	}
+
+	// Second run: verify cache works with -tags
+	cmd2 := exec.CommandContext(ctx, "go", "test", ".", "-count=1")
+	cmd2.Env = env
+	cmd2.Dir = "testdata/notobari"
+	if out, err := cmd2.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "fingerprint mismatch") {
+			t.Fatalf("fingerprint mismatch on cached -tags timetzdata build: %s", string(out))
+		}
+		t.Fatalf("second go test -tags timetzdata failed: %s: %v", string(out), err)
 	}
 }
 

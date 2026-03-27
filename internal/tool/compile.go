@@ -12,7 +12,10 @@ import (
 	"github.com/goccy/tobari/internal/utils"
 )
 
-func handleCompile(ctx context.Context, toolPath string, args []string, embedCode bool) error {
+func handleCompile(ctx context.Context, toolPath string, args []string, opts BuildOpts) error {
+	// Detect trimpath and race from compiler args.
+	opts.Trimpath = hasExplicitTrimpath(args)
+	opts.Race = hasRaceFlag(args)
 	pkgName := getPkgNameFromArgs(args)
 
 	// Check if this package needs overlay
@@ -25,8 +28,15 @@ func handleCompile(ctx context.Context, toolPath string, args []string, embedCod
 			}
 		}
 
-		// Render overlay for this package only
-		pkg, err := overlay.RenderPackage(def, sourceFiles)
+		// Render overlay for this package only.
+		// Pass counter mode so testdeps overlay uses the correct coverage mode.
+		counterMode := "set"
+		if opts.Race {
+			counterMode = "atomic"
+		}
+		pkg, err := overlay.RenderPackage(def, sourceFiles, map[string]string{
+			"counterMode": counterMode,
+		})
 		if err != nil {
 			return fmt.Errorf("failed to render overlay for %s: %w", pkgName, err)
 		}
@@ -40,8 +50,15 @@ func handleCompile(ctx context.Context, toolPath string, args []string, embedCod
 		// Add new tobari.go file
 		args = append(args, pkg.Added...)
 
-		// Add missing imports to importcfg
-		if err := addMissingImportsToImportcfg(args, pkg.Imports); err != nil {
+		// Add missing imports to importcfg.
+		// Pass toolexec and trimpath to ensure packages are compiled with the
+		// same build cache entries as the outer build, preventing fingerprint
+		// mismatches at link time.
+		toolexec, err := tobariToolexec(opts)
+		if err != nil {
+			return err
+		}
+		if err := addMissingImportsToImportcfg(args, pkg.Imports, toolexec, opts); err != nil {
 			return err
 		}
 	}
@@ -57,18 +74,37 @@ func handleCompile(ctx context.Context, toolPath string, args []string, embedCod
 		if err != nil {
 			return fmt.Errorf("failed to read supplementary deps: %w", err)
 		}
-		hookFile, err := generateMainHook(embedCode, suppDeps)
+		hookFile, err := generateMainHook(opts.EmbedCode, suppDeps)
 		if err != nil {
 			return fmt.Errorf("failed to generate main hook: %w", err)
 		}
 		args = append(args, hookFile)
+
+		// Build tobari packages and cache the result for the link phase.
+		// The cache is keyed by the runtime package's export filename, which
+		// uniquely identifies the build configuration (flags like -trimpath,
+		// -race, etc. all change the cache key). This allows the link phase
+		// to find the correctly-built tobari packages without needing to
+		// detect individual flags.
+		if importCfgPath := getImportcfgPathFromArgs(args); importCfgPath != "" {
+			pkgs, err := getTobariPkgs(args, opts)
+			if err != nil {
+				return fmt.Errorf("failed to build tobari packages: %w", err)
+			}
+			if err := saveTobariPkgsCache(importCfgPath, pkgs); err != nil {
+				return err
+			}
+			if err := overwriteImportcfg(importCfgPath, pkgs); err != nil {
+				return fmt.Errorf("failed to update importcfg: %w", err)
+			}
+		}
 	}
 
 	args, err := filterCoveragecfg(args)
 	if err != nil {
 		return err
 	}
-	if err := addTobariPkgsToImportcfgFromCompileOptions(args); err != nil {
+	if err := addTobariPkgsToImportcfgFromCompileOptions(args, opts); err != nil {
 		return err
 	}
 	runCommand(toolPath, args)
@@ -110,7 +146,7 @@ func generateMainHook(embedCode bool, suppDeps string) (string, error) {
 // there may be cases where it doesn't exist in the importcfg as is.
 // In such cases, if the target test uses github.com/goccy/tobari, linking is possible;
 // however, if it doesn't use it, a tobari package must be created dynamically and its path specified.
-func addTobariPkgsToImportcfgFromCompileOptions(args []string) error {
+func addTobariPkgsToImportcfgFromCompileOptions(args []string, opts BuildOpts) error {
 	importCfgPath := getImportcfgPathFromArgs(args)
 
 	var goFiles []string
@@ -156,7 +192,7 @@ SEARCH_TOBARI_PKG_END:
 		return nil
 	}
 
-	pkgs, err := getTobariPkgs(args)
+	pkgs, err := getTobariPkgs(args, opts)
 	if err != nil {
 		return err
 	}
@@ -177,7 +213,9 @@ func getPkgNameFromArgs(args []string) string {
 
 // addMissingImportsToImportcfg adds missing import entries to the importcfg
 // for packages imported by the overlay's tobari.go file.
-func addMissingImportsToImportcfg(args []string, imports []string) error {
+// toolexec and trimpath are passed to GoListExportMap so that packages use
+// the same build cache entries as the outer build.
+func addMissingImportsToImportcfg(args []string, imports []string, toolexec string, opts BuildOpts) error {
 	importCfgPath := getImportcfgPathFromArgs(args)
 	if importCfgPath == "" {
 		return nil
@@ -207,7 +245,12 @@ func addMissingImportsToImportcfg(args []string, imports []string) error {
 	}
 
 	// Get export paths for missing imports via go list
-	exportPaths, err := utils.GoListExportMap(missingImports)
+	exportPaths, err := utils.GoListExportMap(missingImports, utils.GoListOpts{
+		Toolexec:  toolexec,
+		Trimpath:  opts.Trimpath,
+		Race:      opts.Race,
+		BuildTags: opts.BuildTags,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to get export paths: %w", err)
 	}

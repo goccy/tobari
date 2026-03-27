@@ -42,6 +42,7 @@ func ClearCounters() {
 }
 
 func CoverEntriesByName(name string) []*CoverEntry {
+	decodeRawMetas()
 	entryMapMu.RLock()
 	defer entryMapMu.RUnlock()
 
@@ -68,6 +69,7 @@ func CoverprofileMap(mode string) map[string]string {
 }
 
 func CoverEntriesMap() map[string][]*CoverEntry {
+	decodeRawMetas()
 	entryMapMu.RLock()
 	defer entryMapMu.RUnlock()
 
@@ -79,6 +81,7 @@ func CoverEntriesMap() map[string][]*CoverEntry {
 }
 
 func WriteCoverprofile(mode string, w io.Writer) {
+	decodeRawMetas()
 	entryMapMu.RLock()
 	defer entryMapMu.RUnlock()
 
@@ -92,6 +95,7 @@ func WriteCoverprofile(mode string, w io.Writer) {
 }
 
 func WriteCoverprofileByName(name, mode string, w io.Writer) {
+	decodeRawMetas()
 	entryMapMu.RLock()
 	defer entryMapMu.RUnlock()
 
@@ -105,6 +109,7 @@ func WriteCoverprofileByName(name, mode string, w io.Writer) {
 }
 
 func WriteAllCoverprofile(mode string, w io.Writer) {
+	decodeRawMetas()
 	gMapMu.RLock()
 	defer gMapMu.RUnlock()
 
@@ -323,6 +328,9 @@ var (
 	allCoverprofileMapMu   sync.RWMutex
 	chanGIDMap             map[uintptr]*chanLinks
 	chanGIDMapMu           sync.Mutex
+	rawMetas               []string
+	rawMetasMu             sync.Mutex
+	rawMetasOnce           sync.Once
 )
 
 type chanLinks struct {
@@ -741,44 +749,61 @@ func AddSupplementaryDeps(jsonData string) bool {
 
 func AddCoverMeta(s string) bool {
 	initMap()
-	md := parseMetadata(s)
-	allCoverprofileMapMu.Lock()
-
-	funcMapMu.Lock()
-	for _, fn := range md.Funcs {
-		funcMap[fn.Name] = fn
-		funcNames = append(funcNames, fn.Name)
-	}
-	funcMapMu.Unlock()
-
-	for _, fn := range md.Funcs {
-		for _, block := range fn.Blocks {
-			bid := blockID(md.FileName, block.Idx)
-			block.FileName = md.FileName
-			block.Function = fn
-
-			blockMapMu.Lock()
-			blockMap[bid] = block
-			blockMapMu.Unlock()
-
-			allCoverprofileMap[bid] = &CoverEntry{
-				FileName:  md.FileName,
-				StartLine: block.Start.Line,
-				StartCol:  block.Start.Col,
-				EndLine:   block.End.Line,
-				EndCol:    block.End.Col,
-				NumStmts:  block.NumStmts,
-			}
-			allCoverprofileMapKeys = append(allCoverprofileMapKeys, bid)
-		}
-	}
-	allCoverprofileMapMu.Unlock()
-
-	mdMu.Lock()
-	mds = append(mds, &md)
-	mdMu.Unlock()
-
+	rawMetasMu.Lock()
+	rawMetas = append(rawMetas, s)
+	rawMetasMu.Unlock()
 	return true
+}
+
+func decodeRawMetas() {
+	rawMetasOnce.Do(func() {
+		rawMetasMu.Lock()
+		snapshot := make([]string, len(rawMetas))
+		copy(snapshot, rawMetas)
+		rawMetasMu.Unlock()
+
+		for _, s := range snapshot {
+			var md Metadata
+			if err := json.Unmarshal([]byte(s), &md); err != nil {
+				panic(err)
+			}
+			allCoverprofileMapMu.Lock()
+
+			funcMapMu.Lock()
+			for _, fn := range md.Funcs {
+				funcMap[fn.Name] = fn
+				funcNames = append(funcNames, fn.Name)
+			}
+			funcMapMu.Unlock()
+
+			for _, fn := range md.Funcs {
+				for _, block := range fn.Blocks {
+					bid := blockID(md.FileName, block.Idx)
+					block.FileName = md.FileName
+					block.Function = fn
+
+					blockMapMu.Lock()
+					blockMap[bid] = block
+					blockMapMu.Unlock()
+
+					allCoverprofileMap[bid] = &CoverEntry{
+						FileName:  md.FileName,
+						StartLine: block.Start.Line,
+						StartCol:  block.Start.Col,
+						EndLine:   block.End.Line,
+						EndCol:    block.End.Col,
+						NumStmts:  block.NumStmts,
+					}
+					allCoverprofileMapKeys = append(allCoverprofileMapKeys, bid)
+				}
+			}
+			allCoverprofileMapMu.Unlock()
+
+			mdMu.Lock()
+			mds = append(mds, &md)
+			mdMu.Unlock()
+		}
+	})
 }
 
 func toEntries(coverMap map[string]*CoverEntry) []*CoverEntry {
@@ -827,6 +852,7 @@ type CoverReportCountData struct {
 // CollectCoverReportData builds compact coverage data from the current
 // internal state (allCoverprofileMap + CoverEntriesMap).
 func CollectCoverReportData() *CoverReportData {
+	decodeRawMetas()
 	allCoverprofileMapMu.RLock()
 	defer allCoverprofileMapMu.RUnlock()
 
@@ -1043,6 +1069,7 @@ func MarshalReportDataTOON(data *CoverReportData) ([]byte, error) {
 }
 
 func EncodeMeta() ([]byte, error) {
+	decodeRawMetas()
 	mdMu.RLock()
 	defer mdMu.RUnlock()
 
@@ -1055,6 +1082,7 @@ type CoverageFuncCounter struct {
 }
 
 func EncodeCounters() ([]byte, error) {
+	decodeRawMetas()
 	mdMu.RLock()
 	gMapMu.RLock()
 	defer mdMu.RUnlock()

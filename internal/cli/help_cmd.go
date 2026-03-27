@@ -23,6 +23,7 @@ Flags:
 
 Flags Command Options:
     --embed-code, -E    Embed original source code into the instrumented binary
+    -tags=VALUE         Build tags (same as go build -tags)
 
 HTML Command Options:
     -o <file>           Output HTML file path (default: cover.html)
@@ -61,6 +62,9 @@ Examples:
 
     # Use tobari directly as toolexec with source embedding
     go build -cover -toolexec='tobari --embed-code' ./...
+
+    # Use tobari with build tags (e.g., timetzdata)
+    GOFLAGS=$(tobari flags -tags=timetzdata) go build ./...
 
     # Extract embedded sources from an instrumented binary
     tobari extract -o sources.tar.gz ./my-binary

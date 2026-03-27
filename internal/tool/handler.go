@@ -2,10 +2,7 @@ package tool
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,21 +10,22 @@ import (
 	"strings"
 
 	"github.com/goccy/tobari/internal/overlay"
+	"github.com/goccy/tobari/internal/version"
 )
 
-func Handle(ctx context.Context, args []string, embedCode bool) error {
+func Handle(ctx context.Context, args []string, opts BuildOpts) error {
 	toolPath := args[1]
 	toolArgs := args[2:]
 
 	// Handle -V=full flag to isolate build cache
 	if slices.Contains(toolArgs, "-V=full") {
-		return handleVersionFull(ctx, toolPath, toolArgs, embedCode)
+		return handleVersionFull(ctx, toolPath, toolArgs, opts)
 	}
 
 	toolName := filepath.Base(toolPath)
 	switch toolName {
 	case "compile":
-		if err := handleCompile(ctx, toolPath, toolArgs, embedCode); err != nil {
+		if err := handleCompile(ctx, toolPath, toolArgs, opts); err != nil {
 			return err
 		}
 	case "vet":
@@ -35,11 +33,11 @@ func Handle(ctx context.Context, args []string, embedCode bool) error {
 			return err
 		}
 	case "link":
-		if err := handleLink(ctx, toolPath, toolArgs); err != nil {
+		if err := handleLink(ctx, toolPath, toolArgs, opts); err != nil {
 			return err
 		}
 	case "cover":
-		if err := handleCover(ctx, toolPath, toolArgs, embedCode); err != nil {
+		if err := handleCover(ctx, toolPath, toolArgs, opts.EmbedCode); err != nil {
 			return err
 		}
 	default:
@@ -63,7 +61,7 @@ func runCommand(bin string, args []string) {
 	}
 }
 
-func handleVersionFull(ctx context.Context, toolPath string, args []string, embedCode bool) error {
+func handleVersionFull(ctx context.Context, toolPath string, args []string, opts BuildOpts) error {
 	org, err := exec.CommandContext(ctx, toolPath, args...).Output()
 	if err != nil {
 		return fmt.Errorf("failed to run -V=full: %w", err)
@@ -74,36 +72,18 @@ func handleVersionFull(ctx context.Context, toolPath string, args []string, embe
 		return fmt.Errorf("failed to compute overlay hash: %w", err)
 	}
 
-	exeHash, err := executableHash()
+	ver, err := version.Get()
 	if err != nil {
-		return fmt.Errorf("failed to compute executable hash: %w", err)
+		return fmt.Errorf("failed to get tobari version: %w", err)
 	}
 
-	// Output version with tobari hashes; Go uses this as part of the build cache key.
-	// - overlayHash: invalidates cache when overlay files change (e.g., Go version update)
-	// - exeHash: invalidates cache when the tobari binary changes (e.g., new tobari release)
-	// - embedCode: separates cache between embed and non-embed builds
-	fmt.Printf("%s tobari:%s exe:%s embed:%v\n",
-		strings.TrimSpace(string(org)), overlayHash, exeHash, embedCode)
+	// Output version with tobari identifiers; Go uses this as part of the build cache key.
+	// - version: invalidates cache when tobari version changes (e.g., new release)
+	// - overlay: invalidates cache when overlay files change (e.g., Go version update)
+	// - opt: invalidates cache when toolexec options change (e.g., --embed-code)
+	// Note: trimpath and race are excluded from opt because they are detected later
+	// from compiler args and Go already includes them in its own cache key.
+	fmt.Printf("%s tobari:[version:%s overlay:%s opt:%s]\n",
+		strings.TrimSpace(string(org)), ver.ID(), overlayHash, opts.Hash())
 	return nil
-}
-
-func executableHash() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	f, err := os.Open(exe)
-	if err != nil {
-		return "", err
-	}
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		_ = f.Close()
-		return "", err
-	}
-	if err := f.Close(); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
