@@ -84,7 +84,7 @@ func Run(ctx context.Context, args []string, embedCode bool) error {
 			return err
 		}
 		if len(coverPkgs) > 0 {
-			suppDeps, err := CreateWholeProgDeps(inputFiles[0], coverPkgs)
+			suppDeps, err := CreateMainDeps(inputFiles[0], coverPkgs)
 			if err != nil {
 				return err
 			}
