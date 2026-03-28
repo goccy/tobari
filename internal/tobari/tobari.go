@@ -513,6 +513,15 @@ type Block struct {
 	Function *Function `json:"-"`
 }
 
+// MarshalMetadata encodes Metadata into JSON.
+func MarshalMetadata(md *Metadata) string {
+	data, err := json.Marshal(md)
+	if err != nil {
+		panic(fmt.Sprintf("tobari: failed to marshal metadata: %v", err))
+	}
+	return string(data)
+}
+
 var initOnce sync.Once
 
 func init() {
@@ -543,6 +552,30 @@ func initMap() {
 	})
 }
 
+// AddSupplementaryDeps injects whole-program dependency information into the
+// existing funcMap. This is called from main's init (via go:linkname) after all
+// AddCoverMeta calls have completed, so funcMap is fully populated.
+func AddSupplementaryDeps(jsonData string) bool {
+	if jsonData == "" {
+		return true
+	}
+	var suppDeps map[string][]string
+	if err := json.Unmarshal([]byte(jsonData), &suppDeps); err != nil {
+		panic(fmt.Sprintf("tobari: failed to unmarshal supplementary deps: %v", err))
+	}
+	funcMapMu.Lock()
+	defer funcMapMu.Unlock()
+
+	for fnName, deps := range suppDeps {
+		fn, exists := funcMap[fnName]
+		if !exists {
+			continue
+		}
+		fn.Deps = deps
+	}
+	return true
+}
+
 func AddCoverMeta(s string) bool {
 	initMap()
 	rawMetasMu.Lock()
@@ -561,7 +594,7 @@ func decodeRawMetas() {
 		for _, s := range snapshot {
 			var md Metadata
 			if err := json.Unmarshal([]byte(s), &md); err != nil {
-				panic(err)
+				panic(fmt.Sprintf("tobari: failed to unmarshal metadata: %v", err))
 			}
 			allCoverprofileMapMu.Lock()
 
