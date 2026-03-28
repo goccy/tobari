@@ -1,3 +1,39 @@
+// Dependency analysis for coverage instrumentation.
+//
+// # Architecture
+//
+// Tobari's dependency analysis is split into two phases to balance build
+// speed with analysis precision:
+//
+//  1. Per-package lightweight analysis (createLightweightFuncInfo):
+//     Each non-main package records its function names and positions using
+//     only go/types (no SSA). This is fast and runs during the cover tool
+//     invocation for every instrumented package. Each package also writes
+//     its package path to a temp directory keyed by the parent process ID
+//     (ppid), so the main package can later discover all coverage targets.
+//
+//  2. Whole-program RTA analysis at main package (CreateMainDeps):
+//     When the main package is instrumented, it reads the recorded package
+//     paths (via ppid-keyed temp files) and performs whole-program SSA
+//     analysis using RTA (Rapid Type Analysis). This produces an accurate
+//     call graph that correctly handles generics, interfaces, and cross-
+//     package calls. The resulting dependency map is written as JSON and
+//     injected into the binary via go:linkname (AddSupplementaryDeps).
+//
+// # Why ppid-based temp files?
+//
+// The Go toolchain invokes the cover tool as a separate process for each
+// package. These invocations share the same parent process (the `go`
+// command), so os.Getppid() identifies the build session. This allows
+// non-main packages to record their paths and the main package to read
+// them, without any shared state or IPC mechanism.
+//
+// When multiple `go test` commands run concurrently, each has a different
+// ppid, so their temp files are naturally isolated. Within a single
+// `go test ./...`, all packages share the same ppid. The main package
+// filters the recorded paths to only its actual dependencies via the SSA
+// program's package list, so unrelated packages in the same session do
+// not affect the analysis result.
 package cover
 
 import (
