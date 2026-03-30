@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -465,6 +466,18 @@ func TraceChan(chanID uintptr, gid uint64, isSend bool) {
 		sendG.linkG(recvG)
 	}
 	gMapMu.Unlock()
+}
+
+// MaybeTraceChanRange checks at runtime whether v is a channel and, if so,
+// records a receive trace for cross-goroutine coverage linking.
+// This is used for range expressions whose type could not be resolved at
+// compile time (external package types). For non-channel types, it is a no-op.
+// Called via go:linkname from generated covervars code.
+func MaybeTraceChanRange(v any, gid uint64) {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Chan && !rv.IsNil() {
+		TraceChan(rv.Pointer(), gid, false)
+	}
 }
 
 func Trace(fileName string, pgid, gid uint64, blockIdx, startLine, endLine, startCol, endCol, numStmts int) {

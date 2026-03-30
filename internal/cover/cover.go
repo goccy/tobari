@@ -93,14 +93,14 @@ func Run(ctx context.Context, args []string, embedCode bool) error {
 			}
 		}
 		// Also build lightweight func info for main itself.
-		dep, err := createLightweightFuncInfo(pkgcfg, inputFiles[0])
+		dep, err := createLightweightFuncInfo(pkgcfg, inputFiles)
 		if err != nil {
 			return err
 		}
 		depMap = dep
 	} else {
 		// Non-main package: lightweight analysis (no SSA), record package path for later.
-		dep, err := createLightweightFuncInfo(pkgcfg, inputFiles[0])
+		dep, err := createLightweightFuncInfo(pkgcfg, inputFiles)
 		if err != nil {
 			return err
 		}
@@ -249,6 +249,9 @@ func %[2]s_AddEmbeddedSource(string, string) bool
 //go:linkname %[2]s_TraceChan github.com/goccy/tobari/internal/tobari.TraceChan
 func %[2]s_TraceChan(uintptr, uint64, bool)
 
+//go:linkname %[2]s_MaybeTraceChanRange github.com/goccy/tobari/internal/tobari.MaybeTraceChanRange
+func %[2]s_MaybeTraceChanRange(any, uint64)
+
 func %[2]s_chanIDSend[T any](ch chan<- T) uintptr {
 	return *(*uintptr)(unsafe.Pointer(&ch))
 }
@@ -260,6 +263,11 @@ func %[2]s_chanIDRecv[T any](ch <-chan T) uintptr {
 func %[2]s_afterRecvChan[T any](ch <-chan T) <-chan T {
 	%[2]s_TraceChan(%[2]s_chanIDRecv(ch), %[2]s_GID(), false)
 	return ch
+}
+
+func %[2]s_maybeRangeChan[T any](v T) T {
+	%[2]s_MaybeTraceChanRange(any(v), %[2]s_GID())
+	return v
 }
 
 func %[2]s_sendChan[T any](ch chan<- T) chan<- T {
@@ -432,10 +440,23 @@ func (f *Function) addBlock(b *tobari.Block) {
 }
 
 func addTracePointWithContent(pkgcfg *PackageConfig, dep *FunctionDependency, filename string, content []byte, mode string) ([]byte, error) {
-	fset := token.NewFileSet()
-	parsedFile, err := parser.ParseFile(fset, filename, content, parser.ParseComments)
-	if err != nil {
-		return nil, err
+	var fset *token.FileSet
+	var parsedFile *ast.File
+
+	// Reuse parsed AST from createLightweightFuncInfo if available.
+	if dep != nil && dep.Fset != nil {
+		if f, ok := dep.ParsedFiles[filepath.Clean(filename)]; ok {
+			fset = dep.Fset
+			parsedFile = f
+		}
+	}
+	if parsedFile == nil {
+		fset = token.NewFileSet()
+		var err error
+		parsedFile, err = parser.ParseFile(fset, filename, content, parser.ParseComments)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	file := &File{
@@ -675,14 +696,25 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 			f.edit.Insert(f.offset(n.X.End()), ")")
 		}
 	case *ast.RangeStmt:
-		// for v := range ch { → for v := range _tobari_afterRecvChan(ch) {
-		if f.funcDep != nil && f.funcDep.ChanRanges != nil {
+		if f.funcDep != nil && n.X != nil {
 			pos := f.fset.Position(n.X.Pos())
 			key := funcPos{Filename: filepath.Clean(pos.Filename), Offset: pos.Offset}
-			if _, ok := f.funcDep.ChanRanges[key]; ok {
-				f.edit.Insert(f.offset(n.X.Pos()),
-					fmt.Sprintf("%s_afterRecvChan(", tobariPkg))
-				f.edit.Insert(f.offset(n.X.End()), ")")
+			if f.funcDep.ChanRanges != nil {
+				if _, ok := f.funcDep.ChanRanges[key]; ok {
+					// Confirmed channel: use afterRecvChan (no runtime type check needed).
+					f.edit.Insert(f.offset(n.X.Pos()),
+						fmt.Sprintf("%s_afterRecvChan(", tobariPkg))
+					f.edit.Insert(f.offset(n.X.End()), ")")
+					break
+				}
+			}
+			if f.funcDep.PendingRanges != nil {
+				if _, ok := f.funcDep.PendingRanges[key]; ok {
+					// Unresolved type: use maybeRangeChan (runtime type check).
+					f.edit.Insert(f.offset(n.X.Pos()),
+						fmt.Sprintf("%s_maybeRangeChan(", tobariPkg))
+					f.edit.Insert(f.offset(n.X.End()), ")")
+				}
 			}
 		}
 	}
