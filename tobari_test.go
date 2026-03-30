@@ -194,10 +194,12 @@ func TestCacheBehavior(t *testing.T) {
 			hasTest:  true,
 		},
 		{
-			name:     "channel",
-			flagsDir: "testdata/channel",
-			runDir:   "testdata/channel",
-			hasTest:  true,
+			name:         "channel",
+			flagsDir:     "testdata/channel",
+			runDir:       "testdata/channel",
+			testArgs:     []string{"-coverpkg=example.com/channel/..."},
+			hasTest:      true,
+			expectedJSON: "expected_tobari.json",
 		},
 		{
 			name:     "generic",

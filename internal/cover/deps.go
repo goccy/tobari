@@ -40,6 +40,8 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/parser"
+	"go/token"
 	"go/types"
 	"os"
 	"path/filepath"
@@ -66,51 +68,53 @@ type FunctionDependency struct {
 	FuncNames map[funcPos]string
 	// ChanRanges holds positions of range expressions over channels (for v := range ch).
 	ChanRanges map[funcPos]struct{}
+	// PendingRanges holds positions of range expressions whose type could not
+	// be resolved during the cover phase (external package types). These are
+	// wrapped with _maybeRangeChan for runtime channel detection.
+	PendingRanges map[funcPos]struct{}
 }
 
-// createLightweightFuncInfo builds FuncNames and ChanRanges using only go/types
-// (no SSA analysis). DepMap contains each function name as key with nil value,
+// createLightweightFuncInfo builds FuncNames and ChanRanges using go/parser
+// and go/types directly, avoiding the overhead of packages.Load (which spawns
+// go list). Function names are constructed from AST and pkgcfg.PkgPath.
+// Channel range detection uses go/types with a best-effort importer that reads
+// export data from compiled .a files (no subprocess needed).
+// DepMap contains each function name as key with nil value,
 // which is sufficient for renderMetadata's existence check.
 // Dependency information is populated later via whole-program analysis at main package time.
-func createLightweightFuncInfo(pkgcfg *PackageConfig, path string) (*FunctionDependency, error) {
-	dir := filepath.Dir(path)
-	cfg := &packages.Config{
-		Mode: packages.NeedName | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo,
-		Dir:  dir,
-		Env:  filterGOFLAGS(os.Environ()),
+func createLightweightFuncInfo(pkgcfg *PackageConfig, inputFiles []string) (*FunctionDependency, error) {
+	// Parse the input files directly — the Go toolchain passes all .go files
+	// for the package as arguments to the cover tool.
+	fset := token.NewFileSet()
+	var files []*ast.File
+	for _, filePath := range inputFiles {
+		f, err := parser.ParseFile(fset, filePath, nil, 0)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse %s: %w", filePath, err)
+		}
+		files = append(files, f)
 	}
 
-	pkgs, err := packages.Load(cfg, ".")
-	if err != nil {
-		return nil, err
+	// Type-check with a stub importer for channel range detection.
+	// The stub returns empty packages, which is sufficient for types defined
+	// locally. For external types, range expressions are left unresolved and
+	// saved to a pending file; the compile phase resolves them via importcfg.
+	info := &types.Info{
+		Types: make(map[ast.Expr]types.TypeAndValue),
 	}
-	var pkgErrs []error
-	for _, pkg := range pkgs {
-		for _, err := range pkg.Errors {
-			pkgErrs = append(pkgErrs, err)
-		}
+	typesConf := &types.Config{
+		Importer: stubImporter{},
+		Error:    func(err error) {},
 	}
-	if len(pkgErrs) != 0 {
-		return nil, errors.Join(pkgErrs...)
-	}
-
-	var targetPkg *packages.Package
-	for _, pkg := range pkgs {
-		if pkg.Name == pkgcfg.PkgName || pkg.PkgPath == pkgcfg.PkgName {
-			targetPkg = pkg
-			break
-		}
-	}
-	if targetPkg == nil {
-		return nil, fmt.Errorf("failed to find target package: %s", pkgcfg.PkgName)
-	}
+	_, _ = typesConf.Check(pkgcfg.PkgPath, fset, files, info)
 
 	depMap := make(map[string][]string)
 	funcNames := make(map[funcPos]string)
 	chanRanges := make(map[funcPos]struct{})
+	pendingRanges := make(map[funcPos]struct{})
 
 	globalAnonIdx := 1
-	for _, file := range targetPkg.Syntax {
+	for _, file := range files {
 		var curAnon *anonState
 
 		ast.Inspect(file, func(n ast.Node) bool {
@@ -119,16 +123,8 @@ func createLightweightFuncInfo(pkgcfg *PackageConfig, path string) (*FunctionDep
 				if decl.Name.Name == "_" || decl.Body == nil {
 					return false
 				}
-				obj := targetPkg.TypesInfo.Defs[decl.Name]
-				if obj == nil {
-					return true
-				}
-				fn, ok := obj.(*types.Func)
-				if !ok {
-					return true
-				}
-				fqdn := fn.FullName()
-				pos := targetPkg.Fset.Position(decl.Name.Pos())
+				fqdn := buildFuncNameFromAST(pkgcfg.PkgPath, decl)
+				pos := fset.Position(decl.Name.Pos())
 				funcNames[funcPos{
 					Filename: filepath.Clean(pos.Filename),
 					Offset:   pos.Offset,
@@ -137,46 +133,106 @@ func createLightweightFuncInfo(pkgcfg *PackageConfig, path string) (*FunctionDep
 
 				// Collect anonymous functions within this FuncDecl
 				curAnon = &anonState{parentName: fqdn, nextIdx: 1}
-				collectAnonymFuncs(targetPkg, file, decl.Body, curAnon, funcNames, depMap)
+				collectAnonymFuncsFromInfo(fset, file, decl.Body, curAnon, funcNames, depMap)
 				curAnon = nil
 				return false // already walked the body
 
 			case *ast.FuncLit:
 				// Top-level FuncLit (outside any FuncDecl), e.g. var f = func() {}
 				if curAnon == nil {
-					name := fmt.Sprintf("%s.init$%d", targetPkg.PkgPath, globalAnonIdx)
+					name := fmt.Sprintf("%s.init$%d", pkgcfg.PkgPath, globalAnonIdx)
 					globalAnonIdx++
-					pos := targetPkg.Fset.Position(decl.Pos())
+					pos := fset.Position(decl.Pos())
 					funcNames[funcPos{
 						Filename: filepath.Clean(pos.Filename),
 						Offset:   pos.Offset,
 					}] = name
 					depMap[name] = nil
 				}
+			}
+			return true
+		})
 
-			case *ast.RangeStmt:
-				if decl.X != nil {
-					if t := targetPkg.TypesInfo.TypeOf(decl.X); t != nil {
-						if _, ok := t.Underlying().(*types.Chan); ok {
-							pos := targetPkg.Fset.Position(decl.X.Pos())
-							chanRanges[funcPos{
-								Filename: filepath.Clean(pos.Filename),
-								Offset:   pos.Offset,
-							}] = struct{}{}
-						}
-					}
+		// Separate walk for range-over-channel detection.
+		// This must be a full walk (not skipped by FuncDecl's return false).
+		ast.Inspect(file, func(n ast.Node) bool {
+			rs, ok := n.(*ast.RangeStmt)
+			if !ok || rs.X == nil {
+				return true
+			}
+			if tv, ok := info.Types[rs.X]; ok {
+				if _, isChan := tv.Type.Underlying().(*types.Chan); isChan {
+					pos := fset.Position(rs.X.Pos())
+					chanRanges[funcPos{
+						Filename: filepath.Clean(pos.Filename),
+						Offset:   pos.Offset,
+					}] = struct{}{}
 				}
+			} else {
+				// Type not resolved (external package type).
+				// Mark for runtime channel detection via _maybeRangeChan.
+				pos := fset.Position(rs.X.Pos())
+				pendingRanges[funcPos{
+					Filename: filepath.Clean(pos.Filename),
+					Offset:   pos.Offset,
+				}] = struct{}{}
 			}
 			return true
 		})
 	}
 
 	return &FunctionDependency{
-		PkgPath:    targetPkg.PkgPath,
-		DepMap:     depMap,
-		FuncNames:  funcNames,
-		ChanRanges: chanRanges,
+		PkgPath:       pkgcfg.PkgPath,
+		DepMap:        depMap,
+		FuncNames:     funcNames,
+		ChanRanges:    chanRanges,
+		PendingRanges: pendingRanges,
 	}, nil
+}
+
+// buildFuncNameFromAST constructs a fully qualified function name from AST.
+func buildFuncNameFromAST(pkgPath string, decl *ast.FuncDecl) string {
+	if decl.Recv == nil || len(decl.Recv.List) == 0 {
+		return pkgPath + "." + decl.Name.Name
+	}
+	recv := decl.Recv.List[0].Type
+	star := false
+	if starExpr, ok := recv.(*ast.StarExpr); ok {
+		star = true
+		recv = starExpr.X
+	}
+	typeName := recvTypeString(recv)
+	if star {
+		return "(*" + pkgPath + "." + typeName + ")." + decl.Name.Name
+	}
+	return "(" + pkgPath + "." + typeName + ")." + decl.Name.Name
+}
+
+// recvTypeString returns the string representation of a receiver type expression.
+func recvTypeString(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.IndexExpr:
+		return recvTypeString(t.X) + "[" + recvTypeString(t.Index) + "]"
+	case *ast.IndexListExpr:
+		parts := make([]string, len(t.Indices))
+		for i, idx := range t.Indices {
+			parts[i] = recvTypeString(idx)
+		}
+		return recvTypeString(t.X) + "[" + strings.Join(parts, ", ") + "]"
+	default:
+		return fmt.Sprintf("%v", expr)
+	}
+}
+
+// stubImporter returns empty packages for all imports.
+// This allows type-checking to resolve local types (including channels)
+// without needing compiled dependency packages.
+type stubImporter struct{}
+
+func (stubImporter) Import(path string) (*types.Package, error) {
+	return types.NewPackage(path, ""), nil
 }
 
 type anonState struct {
@@ -184,9 +240,9 @@ type anonState struct {
 	nextIdx    int
 }
 
-// collectAnonymFuncs walks a function body and registers all nested FuncLit
+// collectAnonymFuncsFromInfo walks a function body and registers all nested FuncLit
 // nodes with their SSA-compatible names (parent$1, parent$2, etc.).
-func collectAnonymFuncs(pkg *packages.Package, file *ast.File, body *ast.BlockStmt, state *anonState, funcNames map[funcPos]string, depMap map[string][]string) {
+func collectAnonymFuncsFromInfo(fset *token.FileSet, file *ast.File, body *ast.BlockStmt, state *anonState, funcNames map[funcPos]string, depMap map[string][]string) {
 	ast.Inspect(body, func(n ast.Node) bool {
 		lit, ok := n.(*ast.FuncLit)
 		if !ok {
@@ -194,7 +250,7 @@ func collectAnonymFuncs(pkg *packages.Package, file *ast.File, body *ast.BlockSt
 		}
 		name := fmt.Sprintf("%s$%d", state.parentName, state.nextIdx)
 		state.nextIdx++
-		pos := pkg.Fset.Position(lit.Pos())
+		pos := fset.Position(lit.Pos())
 		funcNames[funcPos{
 			Filename: filepath.Clean(pos.Filename),
 			Offset:   pos.Offset,
@@ -203,7 +259,7 @@ func collectAnonymFuncs(pkg *packages.Package, file *ast.File, body *ast.BlockSt
 
 		// Nested anonymous functions inherit the new parent name
 		innerState := &anonState{parentName: name, nextIdx: 1}
-		collectAnonymFuncs(pkg, file, lit.Body, innerState, funcNames, depMap)
+		collectAnonymFuncsFromInfo(fset, file, lit.Body, innerState, funcNames, depMap)
 		return false // already walked nested funcs
 	})
 }
@@ -263,7 +319,6 @@ func CreateMainDeps(mainFilePath string, coverPkgs []string) (map[string][]strin
 	}
 
 	prog, _ := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics)
-	prog.Build()
 
 	// Filter coverPkgSet to only packages that are actual dependencies of this
 	// main package. This prevents coverpkgs recorded by other main packages
@@ -279,6 +334,8 @@ func CreateMainDeps(mainFilePath string, coverPkgs []string) (map[string][]strin
 			delete(coverPkgSet, pkg)
 		}
 	}
+
+	prog.Build()
 
 	// Collect RTA roots from all loaded packages.
 	// For go build/go run: main() and init() are the roots.
