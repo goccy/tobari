@@ -112,6 +112,8 @@ func createLightweightFuncInfo(pkgcfg *PackageConfig, inputFiles []string) (*Fun
 		Importer: stubImporter{},
 		Error:    func(err error) {},
 	}
+	// The returned package is unused; we call Check solely to populate info.Types
+	// for channel range detection below. Errors are expected (stub imports) and ignored.
 	_, _ = typesConf.Check(pkgcfg.PkgPath, fset, files, info)
 
 	depMap := make(map[string][]string)
