@@ -98,7 +98,7 @@ func createLightweightFuncInfo(pkgcfg *PackageConfig, inputFiles []string) (*Fun
 	// Type-check with a stub importer for channel range detection.
 	// The stub returns empty packages, which is sufficient for types defined
 	// locally. For external types, range expressions are left unresolved and
-	// saved to a pending file; the compile phase resolves them via importcfg.
+	// wrapped with _maybeRangeChan for runtime channel detection via reflect.
 	info := &types.Info{
 		Types: make(map[ast.Expr]types.TypeAndValue),
 	}
