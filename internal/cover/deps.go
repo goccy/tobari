@@ -72,6 +72,10 @@ type FunctionDependency struct {
 	// be resolved during the cover phase (external package types). These are
 	// wrapped with _maybeRangeChan for runtime channel detection.
 	PendingRanges map[funcPos]struct{}
+	// Fset and ParsedFiles hold the parsed AST from createLightweightFuncInfo
+	// so that annotateFile can reuse them without re-parsing.
+	Fset        *token.FileSet
+	ParsedFiles map[string]*ast.File // filename → parsed AST
 }
 
 // createLightweightFuncInfo builds FuncNames and ChanRanges using go/parser
@@ -87,12 +91,14 @@ func createLightweightFuncInfo(pkgcfg *PackageConfig, inputFiles []string) (*Fun
 	// for the package as arguments to the cover tool.
 	fset := token.NewFileSet()
 	var files []*ast.File
+	parsedFiles := make(map[string]*ast.File, len(inputFiles))
 	for _, filePath := range inputFiles {
-		f, err := parser.ParseFile(fset, filePath, nil, 0)
+		f, err := parser.ParseFile(fset, filePath, nil, parser.ParseComments)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse %s: %w", filePath, err)
 		}
 		files = append(files, f)
+		parsedFiles[filepath.Clean(filePath)] = f
 	}
 
 	// Type-check with a stub importer for channel range detection.
@@ -187,6 +193,8 @@ func createLightweightFuncInfo(pkgcfg *PackageConfig, inputFiles []string) (*Fun
 		FuncNames:     funcNames,
 		ChanRanges:    chanRanges,
 		PendingRanges: pendingRanges,
+		Fset:          fset,
+		ParsedFiles:   parsedFiles,
 	}, nil
 }
 

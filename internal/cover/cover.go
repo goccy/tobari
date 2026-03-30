@@ -440,10 +440,23 @@ func (f *Function) addBlock(b *tobari.Block) {
 }
 
 func addTracePointWithContent(pkgcfg *PackageConfig, dep *FunctionDependency, filename string, content []byte, mode string) ([]byte, error) {
-	fset := token.NewFileSet()
-	parsedFile, err := parser.ParseFile(fset, filename, content, parser.ParseComments)
-	if err != nil {
-		return nil, err
+	var fset *token.FileSet
+	var parsedFile *ast.File
+
+	// Reuse parsed AST from createLightweightFuncInfo if available.
+	if dep != nil && dep.Fset != nil {
+		if f, ok := dep.ParsedFiles[filepath.Clean(filename)]; ok {
+			fset = dep.Fset
+			parsedFile = f
+		}
+	}
+	if parsedFile == nil {
+		fset = token.NewFileSet()
+		var err error
+		parsedFile, err = parser.ParseFile(fset, filename, content, parser.ParseComments)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	file := &File{
