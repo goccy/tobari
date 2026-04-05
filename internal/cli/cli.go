@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/goccy/tobari/internal/tool"
+	"github.com/goccy/tobari/internal/utils"
 )
 
 // CLI handles command-line interface processing
@@ -54,6 +55,12 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 
 	if len(args) < 2 {
 		return c.showHelp()
+	}
+
+	// Check if this is a GOPACKAGESDRIVER call.
+	// When packages.Load uses tobari as a driver, it sets TOBARI_PACKAGES_DRIVER=1.
+	if os.Getenv(utils.EnvPackagesDriver) == "1" {
+		return tool.HandlePackagesDriver(ctx, args[1:])
 	}
 
 	arg1 := args[1]

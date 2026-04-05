@@ -332,6 +332,8 @@ var (
 	rawMetas               []string
 	rawMetasMu             sync.Mutex
 	rawMetasOnce           sync.Once
+	pendingSuppDeps        map[string][]string
+	pendingSuppDepsMu      sync.Mutex
 )
 
 type chanLinks struct {
@@ -579,13 +581,13 @@ func AddSupplementaryDeps(jsonData string) bool {
 	funcMapMu.Lock()
 	defer funcMapMu.Unlock()
 
-	for fnName, deps := range suppDeps {
-		fn, exists := funcMap[fnName]
-		if !exists {
-			continue
-		}
-		fn.Deps = deps
-	}
+	// Store suppDeps for later application. At this point funcMap is empty
+	// because AddCoverMeta only appends raw JSON strings; funcMap is populated
+	// lazily by decodeRawMetas. The stored suppDeps will be applied after
+	// decodeRawMetas populates funcMap.
+	pendingSuppDepsMu.Lock()
+	pendingSuppDeps = suppDeps
+	pendingSuppDepsMu.Unlock()
 	return true
 }
 
@@ -645,6 +647,20 @@ func decodeRawMetas() {
 			mds = append(mds, &md)
 			mdMu.Unlock()
 		}
+
+		// Apply pending supplementary deps now that funcMap is populated.
+		pendingSuppDepsMu.Lock()
+		if pendingSuppDeps != nil {
+			funcMapMu.Lock()
+			for fnName, deps := range pendingSuppDeps {
+				if fn, exists := funcMap[fnName]; exists {
+					fn.Deps = deps
+				}
+			}
+			funcMapMu.Unlock()
+			pendingSuppDeps = nil
+		}
+		pendingSuppDepsMu.Unlock()
 	})
 }
 
