@@ -245,6 +245,13 @@ func TestCacheBehavior(t *testing.T) {
 			runDir:   "testdata/initorder",
 			runArgs:  []string{"main.go"},
 		},
+		{
+			name:     "initfunc",
+			flagsDir: "testdata/initfunc",
+			runDir:   "testdata/initfunc",
+			runArgs:  []string{"main.go"},
+			hasTest:  true,
+		},
 	}
 
 	goFlagsEnv := func(tobariFlags []string) []string {
