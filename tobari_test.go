@@ -245,6 +245,13 @@ func TestCacheBehavior(t *testing.T) {
 			runDir:   "testdata/initorder",
 			runArgs:  []string{"main.go"},
 		},
+		{
+			name:     "initfunc",
+			flagsDir: "testdata/initfunc",
+			runDir:   "testdata/initfunc",
+			runArgs:  []string{"main.go"},
+			hasTest:  true,
+		},
 	}
 
 	goFlagsEnv := func(tobariFlags []string) []string {
@@ -446,6 +453,58 @@ func TestFingerprintConsistency(t *testing.T) {
 	cmd3.Dir = "testdata/notobari"
 	if out, err := cmd3.CombinedOutput(); err != nil {
 		t.Fatalf("third go test failed: %s: %v", string(out), err)
+	}
+}
+
+// TestCrossPackageDeps verifies that go test -cover ./... (without -coverpkg)
+// does not panic when suppDeps references functions from dependency packages
+// that are not instrumented in the current test binary.
+//
+// Background:
+// CreateMainDeps uses the global cover cache to build coverPkgSet, which
+// may include dependency packages instrumented in other builds. The RTA
+// analysis then generates suppDeps referencing those packages' functions.
+// At runtime, funcMap only contains packages actually instrumented in this
+// binary (via AddCoverMeta). resolveCandidateFuncMap must skip deps not
+// in funcMap rather than panicking.
+//
+// Setup:
+// testdata/crossdeps has pkga (depends on pkgb) and pkgb, both with tests.
+// go test ./... tests both packages. When pkga's test runs, only pkga is
+// instrumented, but pkgb may be in the global cover cache (from pkgb's test).
+// suppDeps for pkga will reference pkgb.Double/pkgb.Greet, which are not
+// in pkga's funcMap → must be skipped without panic.
+func TestCrossPackageDeps(t *testing.T) {
+	ctx := t.Context()
+	tobariBin := filepath.Join(t.TempDir(), "tobari")
+
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+
+	flagsCmd := exec.CommandContext(ctx, tobariBin, "flags")
+	flagsCmd.Dir = "testdata/crossdeps"
+	flagsOut, err := flagsCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("tobari flags failed: %s: %v", string(flagsOut), err)
+	}
+	tobariFlags := strings.Split(strings.TrimSpace(string(flagsOut)), " ")
+	env := append(os.Environ(), "GOFLAGS="+strings.Join(tobariFlags, " "))
+
+	if out, err := exec.CommandContext(ctx, "go", "clean", "-cache").CombinedOutput(); err != nil {
+		t.Fatalf("failed to clean cache: %s: %v", string(out), err)
+	}
+
+	// Run go test ./... which tests both pkga and pkgb. Each test binary
+	// only instruments its own package (-cover without -coverpkg), but the
+	// global cover cache accumulates entries from all packages. pkga depends
+	// on pkgb, so pkga's suppDeps will reference pkgb functions that are not
+	// in pkga's funcMap.
+	cmd := exec.CommandContext(ctx, "go", "test", "./...", "-count=1")
+	cmd.Env = env
+	cmd.Dir = "testdata/crossdeps"
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go test ./... failed: %s: %v", string(out), err)
 	}
 }
 

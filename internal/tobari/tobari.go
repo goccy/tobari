@@ -241,7 +241,12 @@ func resolveCandidateFuncMap(fn *Function, fnMap map[*Function]struct{}) {
 	for _, dep := range fn.Deps {
 		ref, exists := funcMap[dep]
 		if !exists {
-			panic(fmt.Sprintf("tobari: failed to find function reference by %s from %v\n", dep, funcNames))
+			// funcMap is the ground truth for packages instrumented in this
+			// binary (populated via AddCoverMeta at init time). suppDeps may
+			// reference functions from packages that are in the global cover
+			// cache but not instrumented in this binary. Use funcMap as the
+			// runtime coverPkgSet and skip deps outside of it.
+			continue
 		}
 		fn.DepRefs = append(fn.DepRefs, ref)
 	}

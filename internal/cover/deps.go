@@ -156,6 +156,10 @@ func createLightweightFuncInfo(pkgcfg *PackageConfig, inputFiles []string) (*Fun
 	pendingRanges := make(map[funcPos]struct{})
 
 	globalAnonIdx := 1
+	// SSA always creates a synthetic init function (named "init") for
+	// package-level variable initialization. Explicit init() functions
+	// declared by the programmer are numbered init#1, init#2, etc.
+	initCount := 1
 	for _, file := range files {
 		var curAnon *anonState
 
@@ -166,6 +170,10 @@ func createLightweightFuncInfo(pkgcfg *PackageConfig, inputFiles []string) (*Fun
 					return false
 				}
 				fqdn := buildFuncNameFromAST(pkgcfg.PkgPath, decl)
+				if decl.Name.Name == "init" && decl.Recv == nil {
+					fqdn = fmt.Sprintf("%s.init#%d", pkgcfg.PkgPath, initCount)
+					initCount++
+				}
 				pos := fset.Position(decl.Name.Pos())
 				funcNames[funcPos{
 					Filename: filepath.Clean(pos.Filename),
