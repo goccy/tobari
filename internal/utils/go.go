@@ -136,7 +136,7 @@ func GoListExportMap(pkgs []string, opts GoListOpts) (map[string]string, error) 
 	cmd := exec.Command(bin, args...)
 	// Strip GOFLAGS to prevent tobari's -toolexec from being inherited,
 	// which would cause recursive invocations.
-	cmd.Env = filterGOFLAGSEnvs()
+	cmd.Env = FilterGOFLAGSEnvs()
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to run go list: %w", err)
@@ -161,12 +161,35 @@ func GoListDepsExport(dir string, opts GoListOpts, pkg string) (map[string]strin
 	args = append(args, pkg)
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
-	cmd.Env = filterGOFLAGSEnvs()
+	cmd.Env = FilterGOFLAGSEnvs()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to run go list -export -deps: %w", err)
+	}
+	return parseGoListExportJSON(out)
+}
+
+// GoListDepsJSON runs `go list -deps -json` and returns the raw JSON output.
+// Unlike GoListDepsExport, no -export flag is used so no compilation occurs.
+// When isTest is true, -test is added to include test dependencies.
+func GoListDepsJSON(dir string, isTest bool, pkg string) ([]byte, error) {
+	bin, err := GoBin()
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"list", "-deps", "-json"}
+	if isTest {
+		args = append(args, "-test")
+	}
+	args = append(args, pkg)
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = dir
+	cmd.Env = FilterGOFLAGSEnvs()
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to run go list -deps: %w", err)
 	}
-	return parseGoListExportJSON(out)
+	return out, nil
 }
 
 func parseGoListExportJSON(data []byte) (map[string]string, error) {
@@ -187,11 +210,11 @@ func parseGoListExportJSON(data []byte) (map[string]string, error) {
 	return ret, nil
 }
 
-// filterGOFLAGSEnvs strips GOFLAGS to prevent -cover/-toolexec from being
+// FilterGOFLAGSEnvs strips GOFLAGS to prevent -cover/-toolexec from being
 // inherited by inner go list invocations, which would cause recursive
 // invocations and double coverage instrumentation. Build tags and other
 // flags are passed explicitly via function parameters instead.
-func filterGOFLAGSEnvs() []string {
+func FilterGOFLAGSEnvs() []string {
 	envs := os.Environ()
 	newEnvs := make([]string, 0, len(envs))
 	for _, kv := range envs {
@@ -233,4 +256,9 @@ func OverlayDir() string {
 
 func AppPath() string {
 	return filepath.Join(TobariTempDir(), "app", strconv.Itoa(os.Getppid()))
+}
+
+// CoverPkgsDir returns the directory for the global cover package cache.
+func CoverPkgsDir() string {
+	return filepath.Join(TobariTempDir(), "coverpkgs")
 }

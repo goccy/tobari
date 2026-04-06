@@ -2,41 +2,73 @@
 //
 // # Architecture
 //
-// Tobari's dependency analysis is split into two phases to balance build
-// speed with analysis precision:
+// Tobari's dependency analysis is split into two phases:
 //
 //  1. Per-package lightweight analysis (createLightweightFuncInfo):
 //     Each non-main package records its function names and positions using
 //     only go/types (no SSA). This is fast and runs during the cover tool
 //     invocation for every instrumented package. Each package also writes
-//     its package path to a temp directory keyed by the parent process ID
-//     (ppid), so the main package can later discover all coverage targets.
+//     its path and original source file paths to a temp directory so the
+//     main package can later discover all coverage targets.
 //
-//  2. Whole-program RTA analysis at main package (CreateMainDeps):
-//     When the main package is instrumented, it reads the recorded package
-//     paths (via ppid-keyed temp files) and performs whole-program SSA
-//     analysis using RTA (Rapid Type Analysis). This produces an accurate
-//     call graph that correctly handles generics, interfaces, and cross-
-//     package calls. The resulting dependency map is written as JSON and
-//     injected into the binary via go:linkname (AddSupplementaryDeps).
+//  2. Whole-program RTA analysis (CreateMainDeps):
+//     When the main package (or testmain for non-main test packages) is
+//     instrumented, CreateMainDeps runs `go list -deps -json .` to collect
+//     all dependency metadata. No -export or -toolexec is needed: the
+//     driver only uses source-level metadata (Dir, ImportPath, GoFiles,
+//     Imports), not compiled artifacts. The results are written to temp files and
+//     served to packages.Load via a custom GOPACKAGESDRIVER. packages.Load
+//     type-checks all packages from source with consistent type references.
+//     ssautil.AllPackages + prog.Build() constructs SSA with bodies for
+//     every package. Finally, RTA produces an accurate call graph.
 //
-// # Why ppid-based temp files?
+// # Why GOPACKAGESDRIVER?
 //
-// The Go toolchain invokes the cover tool as a separate process for each
-// package. These invocations share the same parent process (the `go`
-// command), so os.Getppid() identifies the build session. This allows
-// non-main packages to record their paths and the main package to read
-// them, without any shared state or IPC mechanism.
+// When NeedTypes is requested, packages.Load normally runs `go list -export`
+// internally. The -export flag causes go list to compile every package and
+// produce .a files containing export data (type information). packages.Load
+// then reads types from these .a files for dependency packages, avoiding
+// source re-parsing — the same optimization the Go compiler uses.
 //
-// When multiple `go test` commands run concurrently, each has a different
-// ppid, so their temp files are naturally isolated. Within a single
-// `go test ./...`, all packages share the same ppid. The main package
-// filters the recorded paths to only its actual dependencies via the SSA
-// program's package list, so unrelated packages in the same session do
-// not affect the analysis result.
+// However, since RTA requires SSA bodies for ALL packages (not just root
+// packages), we request NeedSyntax for every package. This forces
+// packages.Load to parse source files regardless, making the .a-based
+// type loading optimization ineffective. The compilation triggered by
+// -export becomes pure overhead.
+//
+// By providing a custom GOPACKAGESDRIVER that serves `go list -deps -json`
+// output (no -export, no compilation), we skip the unnecessary compilation
+// while still providing all the metadata packages.Load needs to parse and
+// type-check from source.
+//
+// # Why build SSA for ALL packages?
+//
+// RTA traces call edges through function bodies. If a third-party package
+// acts as a "bridge" (e.g., passing callbacks or dispatching interface
+// methods), its SSA body must exist for RTA to discover the edges. Building
+// SSA only for coverage targets would miss these cross-package dependencies.
+//
+// For example: handler.Handle → extlib.Process(data, store.Save) → fn(data)
+// Without extlib's SSA body, RTA cannot see the indirect call fn(data),
+// so the dependency handler.Handle → store.Save is lost.
+//
+// # Temp file organization
+//
+// Cover package cache (global, persists across builds):
+//
+//	$TMPDIR/tobari/coverpkgs/<hash(dir)> — package path and directory
+//	of coverage target. Keyed by SHA256 of the package's source
+//	directory path. Persists across Go build cache hits.
+//
+// Supplementary deps (ppid-keyed, per build session):
+//
+//	$TMPDIR/tobari/suppdeps/<ppid>/_tobari_suppdeps.json — JSON dependency
+//	map injected into the binary via go:linkname.
 package cover
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -53,6 +85,8 @@ import (
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
+
+	"github.com/goccy/tobari/internal/utils"
 )
 
 // funcPos identifies a function by its source position (file + byte offset).
@@ -274,87 +308,121 @@ func collectAnonymFuncsFromInfo(fset *token.FileSet, file *ast.File, body *ast.B
 	})
 }
 
-// filterGOFLAGS removes GOFLAGS from environment variables to prevent
-// recursive toolexec invocations.
-func filterGOFLAGS(envs []string) []string {
-	newEnvs := make([]string, 0, len(envs))
-	for _, kv := range envs {
-		i := strings.IndexByte(kv, '=')
-		if i >= 0 && kv[:i] == "GOFLAGS" {
-			continue
-		}
-		newEnvs = append(newEnvs, kv)
-	}
-	return newEnvs
-}
-
 // CreateMainDeps performs whole-program SSA analysis starting from the main
-// package and returns dependency maps for all coverage-target packages.
-// It uses RTA (Rapid Type Analysis) for call graph construction.
+// package (or test binary) and returns dependency maps for all coverage-target
+// packages. It uses RTA (Rapid Type Analysis) for call graph construction.
 //
-// The package is loaded with Tests=true so that _test.go files are included.
-// This allows RTA to discover concrete types created in test code
-// (e.g., types implementing interfaces) without requiring any changes to
-// main.go. For non-test builds (go build/go run), Tests=true has no effect
-// when no _test.go files exist.
-//
-// RTA roots include main(), init(), and all Test* functions found in the
-// loaded packages, which is equivalent to using testmain.go's main() as root.
-func CreateMainDeps(mainFilePath string, coverPkgs []string) (map[string][]string, error) {
-	coverPkgSet := make(map[string]struct{}, len(coverPkgs))
-	for _, p := range coverPkgs {
-		coverPkgSet[p] = struct{}{}
+// It runs `go list -deps -json .` to collect package metadata (no -export
+// or -toolexec needed), then serves the results to packages.Load via a
+// custom GOPACKAGESDRIVER. The driver determines coverage-target packages
+// by checking the global cache written by recordCoverPkg. All packages are
+// parsed from source and type-checked, then SSA is built for every package
+// so that RTA can trace call edges through third-party libraries.
+// For test mode, -test is added to go list to include test dependencies.
+// Returns nil if no coverage-target packages are found.
+func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *PackageConfig) (map[string][]string, error) {
+	tobariBin, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tobari binary path: %w", err)
 	}
 
-	dir := filepath.Dir(mainFilePath)
-	cfg := &packages.Config{
-		Mode:  packages.LoadAllSyntax,
-		Dir:   dir,
-		Tests: true,
-		Env:   filterGOFLAGS(os.Environ()),
+	dir, err := resolveGoListDir(mainSourceFiles, testPkgCfg)
+	if err != nil {
+		// For testmain with no non-main cover targets, the global cache is
+		// empty and directory resolution fails. This is normal — no suppDeps needed.
+		if testPkgCfg != nil {
+			return nil, nil
+		}
+		return nil, err
 	}
+
+	goListJSON, err := utils.GoListDepsJSON(dir, isTestMode, ".")
+	if err != nil {
+		return nil, fmt.Errorf("failed to run go list: %w", err)
+	}
+
+	// Determine coverage-target packages from the go list output by checking
+	// the global cache written by recordCoverPkg. This works even when Go's
+	// build cache hits and the cover tool is not re-invoked.
+	coverResult, err := buildCoverPkgSet(goListJSON)
+	if err != nil {
+		return nil, err
+	}
+	if len(coverResult.pkgSet) == 0 {
+		return nil, nil
+	}
+
+	// Write go list result and cover package paths to temp files for the driver.
+	goListFile, err := writeTempJSON(goListJSON)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.Remove(goListFile) }()
+
+	coverPkgPathsFile, err := writeTempCoverPkgPaths(coverResult.pkgSet)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.Remove(coverPkgPathsFile) }()
+
+	cfg := &packages.Config{
+		Mode: packages.NeedName | packages.NeedTypes | packages.NeedSyntax |
+			packages.NeedTypesInfo | packages.NeedDeps | packages.NeedImports |
+			packages.NeedFiles | packages.NeedCompiledGoFiles,
+		Dir:   dir,
+		Tests: isTestMode,
+		Env: append(utils.FilterGOFLAGSEnvs(),
+			"GOPACKAGESDRIVER="+tobariBin,
+			utils.EnvPackagesDriver+"=1",
+			utils.EnvGoListFile+"="+goListFile,
+			utils.EnvCoverPkgPathsFile+"="+coverPkgPathsFile,
+		),
+	}
+	coverPkgSet := coverResult.pkgSet
 
 	pkgs, err := packages.Load(cfg, ".")
 	if err != nil {
 		return nil, err
 	}
+
 	var pkgErrs []error
 	for _, pkg := range pkgs {
-		for _, err := range pkg.Errors {
-			pkgErrs = append(pkgErrs, err)
+		for _, e := range pkg.Errors {
+			pkgErrs = append(pkgErrs, e)
 		}
 	}
 	if len(pkgErrs) != 0 {
 		return nil, errors.Join(pkgErrs...)
 	}
 
-	prog, _ := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics)
-
-	// Filter coverPkgSet to only packages that are actual dependencies of this
-	// main package. This prevents coverpkgs recorded by other main packages
-	// (sharing the same ppid directory) from inflating the analysis scope.
+	// Filter coverPkgSet to only actual dependencies.
 	allDepPaths := make(map[string]struct{})
-	for _, p := range prog.AllPackages() {
-		if p.Pkg != nil {
-			allDepPaths[p.Pkg.Path()] = struct{}{}
+	packages.Visit(pkgs, nil, func(p *packages.Package) {
+		if p.Types != nil {
+			allDepPaths[p.PkgPath] = struct{}{}
 		}
-	}
+	})
 	for pkg := range coverPkgSet {
 		if _, ok := allDepPaths[pkg]; !ok {
 			delete(coverPkgSet, pkg)
 		}
 	}
 
+	prog, _ := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics)
+
+	// Build SSA for ALL packages.
 	prog.Build()
 
-	// Collect RTA roots from all loaded packages.
-	// For go build/go run: main() and init() are the roots.
-	// For go test: Test* functions are also included as additional roots,
-	// equivalent to testmain.go's main() calling testing.Main().
+	// Collect RTA roots from main/test packages and cover-target packages.
 	var roots []*ssa.Function
-	for _, pkg := range pkgs {
-		ssaPkg := prog.Package(pkg.Types)
-		if ssaPkg == nil {
+	for _, ssaPkg := range prog.AllPackages() {
+		if ssaPkg.Pkg == nil {
+			continue
+		}
+		pkgPath := ssaPkg.Pkg.Path()
+		isMainOrTest := pkgPath == "main" || strings.HasSuffix(pkgPath, ".test") || strings.Contains(pkgPath, " [")
+		_, isCoverTarget := coverPkgSet[pkgPath]
+		if !isMainOrTest && !isCoverTarget {
 			continue
 		}
 		if mainFunc := ssaPkg.Func("main"); mainFunc != nil {
@@ -399,29 +467,187 @@ func CreateMainDeps(mainFilePath string, coverPkgs []string) (map[string][]strin
 	return suppDeps, nil
 }
 
+// coverPkgSetResult holds cover package paths discovered from the global cache.
+type coverPkgSetResult struct {
+	pkgSet map[string]struct{}
+}
+
+// buildCoverPkgSet parses go list JSON output and checks the global cache
+// to determine which packages are coverage targets.
+func buildCoverPkgSet(goListJSON []byte) (*coverPkgSetResult, error) {
+	type goListPkg struct {
+		Dir string
+	}
+	result := &coverPkgSetResult{pkgSet: make(map[string]struct{})}
+	decoder := json.NewDecoder(bytes.NewReader(goListJSON))
+	for decoder.More() {
+		var pkg goListPkg
+		if err := decoder.Decode(&pkg); err != nil {
+			return nil, fmt.Errorf("failed to decode go list entry: %w", err)
+		}
+		if cache := lookupCoverPkgByDir(pkg.Dir); cache != nil {
+			result.pkgSet[cache.PkgPath] = struct{}{}
+		}
+	}
+	return result, nil
+}
+
+// writeTempCoverPkgPaths writes cover package paths to a temp file for the driver.
+func writeTempCoverPkgPaths(coverPkgSet map[string]struct{}) (string, error) {
+	paths := make([]string, 0, len(coverPkgSet))
+	for p := range coverPkgSet {
+		paths = append(paths, p)
+	}
+	data, err := json.Marshal(paths)
+	if err != nil {
+		return "", err
+	}
+	return writeTempJSON(data)
+}
+
+// resolveGoListDir determines the directory for running go list.
+// For main packages: uses the directory of the first source file.
+// For testmain: scans the global cover package cache, scoped by
+// ModulePath from pkgcfg, to find a cover target's directory.
+func resolveGoListDir(mainSourceFiles []string, testPkgCfg *PackageConfig) (string, error) {
+	if len(mainSourceFiles) > 0 {
+		return filepath.Dir(mainSourceFiles[0]), nil
+	}
+	if testPkgCfg != nil {
+		lookupPath := strings.TrimSuffix(testPkgCfg.PkgPath, ".test")
+		modulePath := testPkgCfg.ModulePath
+
+		cacheDir := utils.CoverPkgsDir()
+		entries, err := os.ReadDir(cacheDir)
+		if err != nil {
+			return "", fmt.Errorf("no cover package cache found: %w", err)
+		}
+		// Single pass: look for exact match and collect a fallback directory.
+		var fallbackDir string
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(cacheDir, entry.Name()))
+			if err != nil {
+				continue
+			}
+			var cache coverPkgCache
+			if err := json.Unmarshal(data, &cache); err != nil || cache.Dir == "" {
+				continue
+			}
+			if modulePath != "" && !strings.HasPrefix(cache.PkgPath, modulePath) {
+				continue
+			}
+			if cache.PkgPath == lookupPath {
+				return cache.Dir, nil
+			}
+			if fallbackDir == "" {
+				fallbackDir = cache.Dir
+			}
+		}
+		// No exact match: the test package is a main package. Derive the
+		// test package directory from a same-module cover target.
+		if fallbackDir != "" {
+			if d := findModuleRootAndDerive(fallbackDir, modulePath, lookupPath); d != "" {
+				return d, nil
+			}
+		}
+		return "", fmt.Errorf("cannot determine test package directory: pkgPath=%q, modulePath=%q", testPkgCfg.PkgPath, modulePath)
+	}
+	return "", fmt.Errorf("cannot determine package directory: mainSourceFiles=%v", mainSourceFiles)
+}
+
+// findModuleRootAndDerive walks up from dir to find go.mod, then derives
+// the target package directory using moduleRoot + (targetPath - modulePath).
+func findModuleRootAndDerive(dir, modulePath, targetPath string) string {
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			rel := strings.TrimPrefix(targetPath, modulePath)
+			rel = strings.TrimPrefix(rel, "/")
+			return filepath.Join(dir, rel)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// writeTempJSON writes data to a temporary file and returns the path.
+func writeTempJSON(data []byte) (string, error) {
+	f, err := os.CreateTemp("", "tobari-driver-*.json")
+	if err != nil {
+		return "", err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	return f.Name(), nil
+}
+
 // normalizeFuncName returns the non-instantiated function name for generic
 // functions (using Origin()), or the plain name for non-generic functions.
 // This ensures SSA names like "(*pkg.Result[int]).IsOk" are normalized to
 // "(*pkg.Result[T]).IsOk" to match per-package metadata from go/types.
+// For test variant packages (e.g., "pkg [pkg.test]"), the variant suffix
+// is stripped so names match the cover tool's funcMap (which uses base paths).
 func normalizeFuncName(fn *ssa.Function) string {
+	name := fn.String()
 	if origin := fn.Origin(); origin != nil {
-		return origin.String()
+		name = origin.String()
 	}
-	return fn.String()
+	return stripTestVariant(name)
+}
+
+// stripTestVariant removes test variant suffixes like " [pkg.test]" from
+// function names. E.g., "example.com/pkg [example.com/pkg.test].Func" becomes
+// "example.com/pkg.Func".
+func stripTestVariant(name string) string {
+	idx := strings.Index(name, " [")
+	if idx < 0 {
+		return name
+	}
+	end := strings.Index(name[idx:], "]")
+	if end < 0 {
+		return name
+	}
+	return name[:idx] + name[idx+end+1:]
 }
 
 // funcCoverPkgPath returns the package path if fn belongs to a coverage-target
 // package. For instantiated generic functions (where Pkg is nil), it checks the
-// Origin function's package instead.
+// Origin function's package instead. For test variant packages (e.g.,
+// "pkg [pkg.test]"), the base path before " [" is checked against coverPkgSet.
 func funcCoverPkgPath(fn *ssa.Function, coverPkgSet map[string]struct{}) string {
 	if fn.Pkg != nil && fn.Pkg.Pkg != nil {
-		if _, ok := coverPkgSet[fn.Pkg.Pkg.Path()]; ok {
-			return fn.Pkg.Pkg.Path()
+		if path := matchCoverPkg(fn.Pkg.Pkg.Path(), coverPkgSet); path != "" {
+			return path
 		}
 	}
 	if origin := fn.Origin(); origin != nil && origin.Pkg != nil && origin.Pkg.Pkg != nil {
-		if _, ok := coverPkgSet[origin.Pkg.Pkg.Path()]; ok {
-			return origin.Pkg.Pkg.Path()
+		if path := matchCoverPkg(origin.Pkg.Pkg.Path(), coverPkgSet); path != "" {
+			return path
+		}
+	}
+	return ""
+}
+
+// matchCoverPkg checks if pkgPath (or its base path for test variants) is in coverPkgSet.
+func matchCoverPkg(pkgPath string, coverPkgSet map[string]struct{}) string {
+	if _, ok := coverPkgSet[pkgPath]; ok {
+		return pkgPath
+	}
+	// Test variant packages have paths like "pkg [pkg.test]".
+	if idx := strings.Index(pkgPath, " ["); idx >= 0 {
+		basePath := pkgPath[:idx]
+		if _, ok := coverPkgSet[basePath]; ok {
+			return basePath
 		}
 	}
 	return ""

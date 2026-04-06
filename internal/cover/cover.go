@@ -69,30 +69,30 @@ func Run(ctx context.Context, args []string, embedCode bool) error {
 
 	var depMap *FunctionDependency
 
-	// When using "go test", it eventually invokes go tool cover with the `-mode testmain` flag,
-	// but the target files in this case are temporary files written under the $WORK directory.
-	// As a result, there is no go.mod file present, and the files cannot be built correctly.
-	// Consequently, a dependency map cannot be created, so the generation process is skipped altogether.
 	if opt.mode == "testmain" {
 		if err := addTobariImportToTestMain(inputFiles[0]); err != nil {
 			return err
 		}
-	} else if pkgcfg.PkgName == "main" {
-		// Main package: perform whole-program SSA analysis for all coverage-target packages.
-		coverPkgs, err := readCoverPkgs()
-		if err != nil {
+		if err := createAndWriteSuppDeps(nil, true, pkgcfg); err != nil {
 			return err
 		}
-		if len(coverPkgs) > 0 {
-			suppDeps, err := CreateMainDeps(inputFiles[0], coverPkgs)
-			if err != nil {
-				return err
+	} else if pkgcfg.PkgName == "main" {
+		// Perform whole-program SSA analysis for go run/go build.
+		// For go test, the testmain phase handles this instead (with -test
+		// flag for test dependencies), so skip the redundant analysis here.
+		// Detection: go test includes _test.go files in inputFiles.
+		hasTestFiles := false
+		for _, f := range inputFiles {
+			if strings.HasSuffix(f, "_test.go") {
+				hasTestFiles = true
+				break
 			}
-			if err := writeSuppDeps(suppDeps); err != nil {
+		}
+		if !hasTestFiles {
+			if err := createAndWriteSuppDeps(inputFiles, false, nil); err != nil {
 				return err
 			}
 		}
-		// Also build lightweight func info for main itself.
 		dep, err := createLightweightFuncInfo(pkgcfg, inputFiles)
 		if err != nil {
 			return err
@@ -106,7 +106,7 @@ func Run(ctx context.Context, args []string, embedCode bool) error {
 		}
 		depMap = dep
 		if pkgcfg.PkgPath != "" {
-			if err := recordCoverPkg(pkgcfg.PkgPath); err != nil {
+			if err := recordCoverPkg(pkgcfg.PkgPath, inputFiles); err != nil {
 				return err
 			}
 		}
@@ -1209,40 +1209,70 @@ func (b *Buffer) Bytes() []byte {
 	return result
 }
 
-// recordCoverPkg writes the package path to a per-process temp directory so that
-// the main package's cover.Run can discover all coverage-target packages.
-func recordCoverPkg(pkgPath string) error {
-	dir := filepath.Join(utils.TobariTempDir(), "coverpkgs", strconv.Itoa(os.Getppid()))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+// createAndWriteSuppDeps runs CreateMainDeps and writes the resulting
+// supplementary deps. mainSourceFiles may be nil for testmain mode
+// where the auto-generated _testmain.go is not suitable. For testmain,
+// testPkgCfg provides the package config for directory resolution.
+func createAndWriteSuppDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *PackageConfig) error {
+	suppDeps, err := CreateMainDeps(mainSourceFiles, isTestMode, testPkgCfg)
+	if err != nil {
 		return err
 	}
-	hash := sha256.Sum256([]byte(pkgPath))
-	filename := filepath.Join(dir, hex.EncodeToString(hash[:]))
-	return os.WriteFile(filename, []byte(pkgPath), 0o644)
+	if suppDeps == nil {
+		return nil
+	}
+	return writeSuppDeps(suppDeps)
 }
 
-// readCoverPkgs reads all coverage-target package paths recorded by non-main packages.
-func readCoverPkgs() ([]string, error) {
-	dir := filepath.Join(utils.TobariTempDir(), "coverpkgs", strconv.Itoa(os.Getppid()))
-	entries, err := os.ReadDir(dir)
+// coverPkgCache is the data stored in the global cover package cache.
+type coverPkgCache struct {
+	PkgPath string `json:"p"`
+	Dir     string `json:"d"`
+}
+
+// recordCoverPkg writes a marker to a global cache directory indicating that
+// the given package is a coverage target. The cache is keyed by the SHA256
+// hash of the package's source directory, so it naturally handles different
+// module versions (different paths) and survives Go's build cache hits
+// (unlike ppid-based temp files which are lost when the cover tool is not
+// re-invoked).
+func recordCoverPkg(pkgPath string, sourceFiles []string) error {
+	if len(sourceFiles) == 0 {
+		return nil
+	}
+	cacheDir := utils.CoverPkgsDir()
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return err
+	}
+	pkgDir := filepath.Dir(sourceFiles[0])
+	cache := coverPkgCache{PkgPath: pkgPath, Dir: pkgDir}
+	data, err := json.Marshal(cache)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
+		return err
 	}
-	var pkgs []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
-		if err != nil {
-			return nil, err
-		}
-		pkgs = append(pkgs, string(data))
+	filename := filepath.Join(cacheDir, coverPkgDirHash(pkgDir))
+	return os.WriteFile(filename, data, 0o644)
+}
+
+// lookupCoverPkgByDir checks the global cache to determine if the given
+// directory contains a coverage-target package.
+func lookupCoverPkgByDir(pkgDir string) *coverPkgCache {
+	filename := filepath.Join(utils.CoverPkgsDir(), coverPkgDirHash(pkgDir))
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil
 	}
-	return pkgs, nil
+	var cache coverPkgCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return nil
+	}
+	return &cache
+}
+
+// coverPkgDirHash computes a cache key from a package directory path.
+func coverPkgDirHash(dir string) string {
+	h := sha256.Sum256([]byte(dir))
+	return hex.EncodeToString(h[:])
 }
 
 const suppDepsFileName = "_tobari_suppdeps.json"
