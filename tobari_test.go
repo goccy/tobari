@@ -678,6 +678,76 @@ func TestTags(t *testing.T) {
 	}
 }
 
+// TestFingerprintMismatchVersionDifference verifies that tobari works correctly
+// when the tobari binary version differs from the version used by the target module.
+//
+// Background:
+// When a user installs tobari at version X but their application depends on
+// tobari at version Y (via go.mod), the inner build (buildPackages) must use
+// version Y — not X — to compile the tobari library packages. Otherwise, the
+// overlay-modified runtime packages reference tobari packages at version X while
+// the target links against version Y, causing fingerprint mismatches at link time.
+//
+// This test builds the tobari binary with a fake version (v99.99.99) via ldflags
+// and runs it against a module that depends on tobari via a local replace directive.
+// Without the fix, the inner build would try to fetch v99.99.99 from the module proxy
+// and fail. With the fix, it detects the target module's replace directive and uses
+// the local path instead.
+func TestFingerprintMismatchVersionDifference(t *testing.T) {
+	ctx := t.Context()
+	tobariBin := filepath.Join(t.TempDir(), "tobari")
+
+	// Build tobari with a fake version that doesn't exist on the module proxy.
+	if out, err := exec.CommandContext(ctx, "go", "build",
+		"-ldflags", "-X github.com/goccy/tobari/internal/version.ver=v99.99.99",
+		"-o", tobariBin,
+		"./cmd/tobari",
+	).CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+
+	// Get tobari flags for a module that depends on tobari (via replace directive).
+	flagsCmd := exec.CommandContext(ctx, tobariBin, "flags")
+	flagsCmd.Dir = "testdata/crosspkg"
+	flagsOut, err := flagsCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("tobari flags failed: %s: %v", string(flagsOut), err)
+	}
+	tobariFlags := strings.Split(strings.TrimSpace(string(flagsOut)), " ")
+
+	env := os.Environ()
+	env = append(env, "GOFLAGS="+strings.Join(tobariFlags, " "))
+
+	// Clean go build cache
+	if out, err := exec.CommandContext(ctx, "go", "clean", "-cache").CombinedOutput(); err != nil {
+		t.Fatalf("failed to clean cache: %s: %v", string(out), err)
+	}
+
+	// Run go test against a module that depends on tobari.
+	// Without the fix, this fails because the inner build tries to fetch v99.99.99.
+	// With the fix, it detects the target module's replace directive and succeeds.
+	cmd := exec.CommandContext(ctx, "go", "test", ".", "-count=1")
+	cmd.Env = env
+	cmd.Dir = "testdata/crosspkg"
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "fingerprint mismatch") {
+			t.Fatalf("fingerprint mismatch with version difference: %s", string(out))
+		}
+		t.Fatalf("go test failed: %s: %v", string(out), err)
+	}
+
+	// Second run: verify cache works with version mismatch.
+	cmd2 := exec.CommandContext(ctx, "go", "test", ".", "-count=1")
+	cmd2.Env = env
+	cmd2.Dir = "testdata/crosspkg"
+	if out, err := cmd2.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "fingerprint mismatch") {
+			t.Fatalf("fingerprint mismatch on cached build with version difference: %s", string(out))
+		}
+		t.Fatalf("second go test failed: %s: %v", string(out), err)
+	}
+}
+
 func TestEmbedCode(t *testing.T) {
 	ctx := t.Context()
 	tmpDir := t.TempDir()

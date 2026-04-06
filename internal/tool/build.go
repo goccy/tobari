@@ -3,7 +3,10 @@ package tool
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+
+	"golang.org/x/mod/modfile"
 
 	"github.com/goccy/tobari/internal/version"
 )
@@ -27,6 +30,15 @@ func getTobariPkgs(args []string, opts BuildOpts) (map[string]string, error) {
 	ver, err := version.Get()
 	if err != nil {
 		return nil, err
+	}
+	// Prefer the target module's tobari version over the binary's version.
+	// When the tobari binary is built with one version but the target application
+	// depends on a different version, using the binary's version would cause
+	// fingerprint mismatches at link time because the overlay-modified runtime
+	// packages would reference tobari packages at the binary's version while
+	// the target links against its own version.
+	if targetVer := resolveTargetTobariVersion(); targetVer != nil {
+		ver = targetVer
 	}
 	pkgs, err := buildPackages(ver, getLangFromArgs(args), opts)
 	if err != nil {
@@ -66,6 +78,63 @@ func hasRaceFlag(args []string) bool {
 		}
 	}
 	return false
+}
+
+// resolveTargetTobariVersion reads the target module's go.mod to determine
+// which version of github.com/goccy/tobari it depends on. Returns nil if
+// the target module does not depend on tobari.
+func resolveTargetTobariVersion() *version.Version {
+	dir, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+	var goModPath string
+	for {
+		p := filepath.Join(dir, "go.mod")
+		if _, err := os.Stat(p); err == nil {
+			goModPath = p
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil
+		}
+		dir = parent
+	}
+
+	data, err := os.ReadFile(goModPath)
+	if err != nil {
+		return nil
+	}
+	f, err := modfile.Parse("go.mod", data, nil)
+	if err != nil {
+		return nil
+	}
+
+	modDir := filepath.Dir(goModPath)
+
+	// Check replace directives first.
+	for _, rep := range f.Replace {
+		if rep.Old.Path == "github.com/goccy/tobari" {
+			if rep.New.Version == "" {
+				localPath := rep.New.Path
+				if !filepath.IsAbs(localPath) {
+					localPath = filepath.Join(modDir, localPath)
+				}
+				return &version.Version{LocalPath: localPath}
+			}
+			return &version.Version{Ver: rep.New.Version}
+		}
+	}
+
+	// Check require directives.
+	for _, req := range f.Require {
+		if req.Mod.Path == "github.com/goccy/tobari" {
+			return &version.Version{Ver: req.Mod.Version}
+		}
+	}
+
+	return nil
 }
 
 func getLangFromArgs(args []string) string {
