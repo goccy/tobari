@@ -10,7 +10,8 @@ on:
     paths:
       - .goreleaser.yml
       - .github/workflows/release-test.yml
-
+permissions:
+  contents: read
 jobs:
   release-test:
     runs-on: ubuntu-latest
