@@ -1287,8 +1287,6 @@ func coverPkgDirHash(dir string) string {
 	return hex.EncodeToString(h[:])
 }
 
-const suppDepsFileName = "_tobari_suppdeps.json"
-
 // writeSuppDeps writes the supplementary dependency map as JSON to the
 // package-specific $WORK/bNNN/ directory. Each package gets its own
 // isolated file, preventing races when go test ./... or go build ./...
@@ -1298,7 +1296,7 @@ func writeSuppDeps(deps map[string][]string, workDir string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(workDir, suppDepsFileName), data, 0o644)
+	return os.WriteFile(filepath.Join(workDir, utils.TmpSuppDepsFile), data, 0o644)
 }
 
 // ReadSuppDeps reads the supplementary dependency map from the
@@ -1307,7 +1305,7 @@ func writeSuppDeps(deps map[string][]string, workDir string) error {
 // Returns empty string if the file does not exist.
 func ReadSuppDeps(sourceFiles []string) (string, error) {
 	for _, f := range sourceFiles {
-		candidate := filepath.Join(filepath.Dir(f), suppDepsFileName)
+		candidate := filepath.Join(filepath.Dir(f), utils.TmpSuppDepsFile)
 		if data, err := os.ReadFile(candidate); err == nil {
 			return string(data), nil
 		}

@@ -13,6 +13,40 @@ import (
 	"strings"
 )
 
+// Tobari-managed temp file names. All tobari-created temp files use the
+// "tobari_" prefix with underscore separators. Files under $WORK/bNNN/ are
+// shared between the cover/compile/link phases of the same package; files
+// created via os.CreateTemp/os.MkdirTemp are ephemeral per tool invocation.
+const (
+	// tmpWorkAppDirName is the per-build directory under $WORK that holds
+	// a minimal Go module used to resolve tobari package export paths.
+	tmpWorkAppDirName = "tobari_app"
+
+	// TmpSuppDepsFile is written by the cover tool under $WORK/bNNN/ and
+	// read by the compile tool to inject supplementary dependencies.
+	TmpSuppDepsFile = "tobari_suppdeps.json"
+
+	// TmpPkgsCacheFile is written by the compile tool under $WORK/bNNN/
+	// and read by the link tool to recover tobari package export paths.
+	TmpPkgsCacheFile = "tobari_pkgs.json"
+
+	// TmpMainHookPattern is the os.CreateTemp pattern for the generated
+	// tobari_main.go hook file injected into main package compilation.
+	TmpMainHookPattern = "tobari_main_*.go"
+
+	// TmpDriverJSONPattern is the os.CreateTemp pattern for GOPACKAGESDRIVER
+	// IPC files.
+	TmpDriverJSONPattern = "tobari_driver_*.json"
+
+	// TmpCoverprofilePattern is the os.CreateTemp pattern for the intermediate
+	// coverprofile used by `tobari html`.
+	TmpCoverprofilePattern = "tobari_coverprofile_*.txt"
+
+	// TmpHTMLDirPattern is the os.MkdirTemp pattern used by `tobari html`
+	// for its working directory.
+	TmpHTMLDirPattern = "tobari_html_*"
+)
+
 
 func GoRoot() (string, error) {
 	// check GOROOT environment variable first (set by toolchain switching)
@@ -254,8 +288,11 @@ func OverlayDir() string {
 	return filepath.Join(TobariTempDir(), "overlay")
 }
 
-func AppPath() string {
-	return filepath.Join(TobariTempDir(), "app", strconv.Itoa(os.Getppid()))
+// WorkAppDir returns the per-build temporary module directory created
+// under Go's $WORK. It is shared across compile/link toolexec invocations
+// of the same build and automatically cleaned up by `go build`.
+func WorkAppDir(workDir string) string {
+	return filepath.Join(workDir, tmpWorkAppDirName)
 }
 
 // CoverPkgsDir returns the directory for the global cover package cache.

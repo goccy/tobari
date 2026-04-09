@@ -20,10 +20,13 @@ func handleLink(ctx context.Context, toolPath string, args []string, opts BuildO
 		if err := overwriteImportcfg(importCfgPath, pkgs); err != nil {
 			return fmt.Errorf("failed to update importcfg: %w", err)
 		}
-	} else {
+	} else if !importcfgHasTobari(importCfgPath) {
 		// Cache miss: fall back to building tobari packages without flag
 		// information. This path is hit only if the compile phase was
 		// skipped entirely AND no prior cache exists.
+		// Skip when tobari is already in importcfg (user code directly
+		// imports tobari) — same reasoning as the compile phase early
+		// return: there is nothing for us to add.
 		fallbackOpts := BuildOpts{
 			EmbedCode: opts.EmbedCode,
 			BuildTags: opts.BuildTags,

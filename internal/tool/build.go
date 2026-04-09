@@ -40,11 +40,31 @@ func getTobariPkgs(args []string, opts BuildOpts) (map[string]string, error) {
 	if targetVer := resolveTargetTobariVersion(); targetVer != nil {
 		ver = targetVer
 	}
-	pkgs, err := buildPackages(ver, getLangFromArgs(args), opts)
+	workDir, err := workDirFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	pkgs, err := buildPackages(workDir, ver, getLangFromArgs(args), opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build temp module: %w", err)
 	}
 	return pkgs, nil
+}
+
+// workDirFromArgs derives Go's per-build $WORK directory from a toolexec
+// command's args. The compile/link tools always receive an
+// `-importcfg $WORK/bNNN/importcfg` flag, so $WORK is the importcfg path's
+// grandparent. As a defensive fallback (which should not occur in practice),
+// it creates an ephemeral temp dir for this single invocation.
+func workDirFromArgs(args []string) (string, error) {
+	if importCfgPath := getImportcfgPathFromArgs(args); importCfgPath != "" {
+		return filepath.Dir(filepath.Dir(importCfgPath)), nil
+	}
+	dir, err := os.MkdirTemp("", "tobari_workdir_*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create fallback workdir: %w", err)
+	}
+	return dir, nil
 }
 
 func getImportcfgPathFromArgs(args []string) string {
@@ -54,6 +74,18 @@ func getImportcfgPathFromArgs(args []string) string {
 		}
 	}
 	return ""
+}
+
+// importcfgHasTobari reports whether the importcfg file already contains a
+// top-level packagefile entry for github.com/goccy/tobari. We anchor the match
+// on the `packagefile ` prefix and trailing `=` so that subpackage entries
+// (e.g. github.com/goccy/tobari/internal/...) do not produce false positives.
+func importcfgHasTobari(importCfgPath string) bool {
+	data, err := os.ReadFile(importCfgPath)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "packagefile github.com/goccy/tobari=")
 }
 
 // hasExplicitTrimpath detects whether the user has passed -trimpath to go build/test.

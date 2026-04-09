@@ -101,7 +101,13 @@ func handleCompile(ctx context.Context, toolPath string, args []string, opts Bui
 		// -race, etc. all change the cache key). This allows the link phase
 		// to find the correctly-built tobari packages without needing to
 		// detect individual flags.
-		if importCfgPath := getImportcfgPathFromArgs(args); importCfgPath != "" {
+		//
+		// Skip entirely when tobari is already in the importcfg — that means
+		// the user's code directly imports tobari, so the Go build has
+		// already resolved and placed the tobari entries into importcfg, and
+		// running `go list -deps -export` (which is slow and creates the
+		// per-build app dir) would be wasted work.
+		if importCfgPath := getImportcfgPathFromArgs(args); importCfgPath != "" && !importcfgHasTobari(importCfgPath) {
 			pkgs, err := getTobariPkgs(args, opts)
 			if err != nil {
 				return fmt.Errorf("failed to build tobari packages: %w", err)
@@ -127,7 +133,7 @@ func handleCompile(ctx context.Context, toolPath string, args []string, opts Bui
 }
 
 func generateMainHook(embedCode bool, suppDeps string) (string, error) {
-	f, err := os.CreateTemp("", "_tobari_main_*.go")
+	f, err := os.CreateTemp("", utils.TmpMainHookPattern)
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
