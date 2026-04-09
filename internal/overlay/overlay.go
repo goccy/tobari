@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"text/template"
 
 	"github.com/goccy/tobari/internal/utils"
@@ -120,7 +121,7 @@ func ComputeHash() (string, error) {
 			}
 
 			fset := token.NewFileSet()
-			file, err := parser.ParseFile(fset, pkgFile, src, 0)
+			file, err := parser.ParseFile(fset, pkgFile, src, parser.ParseComments)
 			if err != nil {
 				return "", fmt.Errorf("failed to parse package file %s: %w", pkgFile, err)
 			}
@@ -136,6 +137,7 @@ func ComputeHash() (string, error) {
 					continue
 				}
 				newName := fn.Name + "_" + funcSuffix
+				stripLinknameDirectives(funcDecl.Doc, fn.Name)
 				funcDecl.Name = &ast.Ident{Name: newName}
 				pkgScopedReplacedNameMap[fn.Name] = newName
 				hasRename = true
@@ -202,7 +204,7 @@ func RenderPackage(def *Definition, sourceFiles []string, templateVars map[strin
 		}
 
 		fset := token.NewFileSet()
-		file, err := parser.ParseFile(fset, srcFile, src, 0)
+		file, err := parser.ParseFile(fset, srcFile, src, parser.ParseComments)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse source file %s: %w", srcFile, err)
 		}
@@ -218,6 +220,7 @@ func RenderPackage(def *Definition, sourceFiles []string, templateVars map[strin
 				continue
 			}
 			newName := fn.Name + "_" + funcSuffix
+			stripLinknameDirectives(funcDecl.Doc, fn.Name)
 			funcDecl.Name = &ast.Ident{Name: newName}
 			pkgScopedReplacedNameMap[fn.Name] = newName
 			hasRename = true
@@ -333,6 +336,31 @@ func atomicWriteFile(path string, content []byte) error {
 
 	// Atomic rename
 	return os.Rename(tmpPath, path)
+}
+
+// stripLinknameDirectives removes any //go:linkname directives from a
+// function's doc comment that name the given local symbol. Required when
+// renaming a function via overlay: the original directive is parsed by the
+// compiler regardless of the function's new name (the directive carries the
+// linkname literally), so leaving it in place would either keep the original
+// linkname bound to the renamed body, or — when tobari.go injects a new
+// function with the same linkname — produce a "duplicate //go:linkname"
+// compile error. Other directives (//go:nosplit, //go:noinline, etc.) are
+// preserved because they still apply to the renamed function.
+func stripLinknameDirectives(doc *ast.CommentGroup, localName string) {
+	if doc == nil {
+		return
+	}
+	exact := "//go:linkname " + localName
+	prefix := exact + " "
+	filtered := doc.List[:0]
+	for _, c := range doc.List {
+		if c.Text == exact || strings.HasPrefix(c.Text, prefix) {
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+	doc.List = filtered
 }
 
 func matchedFunc(def *Definition, decl *ast.FuncDecl) *Function {
