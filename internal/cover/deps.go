@@ -453,8 +453,11 @@ func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *Packa
 			}
 		}
 	}
+	// No entry points (main/init/Test*) means RTA has nothing to trace from,
+	// so no supplementary deps can be produced. Treat this as a no-op rather
+	// than a hard error — the build should still succeed.
 	if len(roots) == 0 {
-		return nil, fmt.Errorf("no entry points found in main package")
+		return nil, nil
 	}
 
 	rtaResult := rta.Analyze(roots, true)
