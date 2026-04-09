@@ -60,10 +60,12 @@
 //	of coverage target. Keyed by SHA256 of the package's source
 //	directory path. Persists across Go build cache hits.
 //
-// Supplementary deps (ppid-keyed, per build session):
+// Supplementary deps (per-package, per build):
 //
-//	$TMPDIR/tobari/suppdeps/<ppid>/_tobari_suppdeps.json — JSON dependency
-//	map injected into the binary via go:linkname.
+//	$WORK/bNNN/tobari_suppdeps.json — JSON dependency map written by the
+//	cover tool and read by the compile tool to inject the data into the
+//	binary via go:linkname. Each package gets its own file in its own
+//	$WORK/bNNN/ build directory, so parallel builds do not race.
 package cover
 
 import (
@@ -585,7 +587,7 @@ func findModuleRootAndDerive(dir, modulePath, targetPath string) string {
 
 // writeTempJSON writes data to a temporary file and returns the path.
 func writeTempJSON(data []byte) (string, error) {
-	f, err := os.CreateTemp("", "tobari-driver-*.json")
+	f, err := os.CreateTemp("", utils.TmpDriverJSONPattern)
 	if err != nil {
 		return "", err
 	}

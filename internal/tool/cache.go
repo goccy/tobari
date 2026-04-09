@@ -11,8 +11,6 @@ import (
 	"github.com/goccy/tobari/internal/utils"
 )
 
-const tobariPkgsCacheFile = ".tobari-pkgs"
-
 // getRuntimeExportPath parses an importcfg file and returns the export path
 // for the runtime package.
 func getRuntimeExportPath(importcfgPath string) string {
@@ -43,7 +41,7 @@ func getRuntimeExportPath(importcfgPath string) string {
 //     Used when the link phase references cached packages from the Go build cache.
 //     The runtime export filename in Go's build cache is the SHA256 of the file
 //     content, so it uniquely identifies the build configuration.
-//  2. <dir_of_runtime_work_path>/.tobari-pkgs
+//  2. <dir_of_runtime_work_path>/tobari_pkgs.json
 //     Used within the same build where compile and link share the same $WORK directory.
 func saveTobariPkgsCache(compileImportcfgPath string, pkgs map[string]string) error {
 	// Get runtime's path from the compile importcfg (this is a $WORK/bNN/_pkg_.a path)
@@ -71,8 +69,8 @@ func saveTobariPkgsCache(compileImportcfgPath string, pkgs map[string]string) er
 	cacheFile := filepath.Join(cacheDir, filepath.Base(runtimeCachePath)+".json")
 	_ = os.WriteFile(cacheFile, data, 0o600)
 
-	// Write to <dir_of_runtime_work_path>/.tobari-pkgs
-	localFile := filepath.Join(filepath.Dir(runtimeWorkPath), tobariPkgsCacheFile)
+	// Write to <dir_of_runtime_work_path>/tobari_pkgs.json
+	localFile := filepath.Join(filepath.Dir(runtimeWorkPath), utils.TmpPkgsCacheFile)
 	_ = os.WriteFile(localFile, data, 0o600)
 
 	return nil
@@ -84,7 +82,7 @@ func saveTobariPkgsCache(compileImportcfgPath string, pkgs map[string]string) er
 // It tries two cache locations:
 //  1. $TMPDIR/tobari/cache/<filename_of_runtime>.json — hits when the link phase
 //     references cached packages from Go's build cache.
-//  2. <dir_of_runtime>/.tobari-pkgs — hits within the same build where compile
+//  2. <dir_of_runtime>/tobari_pkgs.json — hits within the same build where compile
 //     and link share the same $WORK directory.
 func loadTobariPkgsCache(linkImportcfgPath string) (map[string]string, bool) {
 	runtimePath := getRuntimeExportPath(linkImportcfgPath)
@@ -98,8 +96,8 @@ func loadTobariPkgsCache(linkImportcfgPath string) (map[string]string, bool) {
 		return pkgs, true
 	}
 
-	// Try <dir_of_runtime>/.tobari-pkgs
-	localFile := filepath.Join(filepath.Dir(runtimePath), tobariPkgsCacheFile)
+	// Try <dir_of_runtime>/tobari_pkgs.json
+	localFile := filepath.Join(filepath.Dir(runtimePath), utils.TmpPkgsCacheFile)
 	if pkgs, ok := readAndValidatePkgsCache(localFile); ok {
 		return pkgs, true
 	}

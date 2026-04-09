@@ -13,12 +13,12 @@ import (
 	"github.com/goccy/tobari/internal/version"
 )
 
-func buildPackages(ver *version.Version, lang string, opts BuildOpts) (map[string]string, error) {
-	appDir := appPath(ver)
+func buildPackages(workDir string, ver *version.Version, lang string, opts BuildOpts) (map[string]string, error) {
+	appDir := utils.WorkAppDir(workDir)
 	// Skip createApp if the directory was already prepared by a prior toolexec
-	// invocation.
+	// invocation in the same build (same $WORK).
 	if _, err := os.Stat(filepath.Join(appDir, "go.sum")); err != nil {
-		if err := createApp(ver, lang); err != nil {
+		if err := createApp(appDir, ver, lang); err != nil {
 			return nil, fmt.Errorf("failed to create temp app: %w", err)
 		}
 	}
@@ -52,18 +52,17 @@ func buildPackages(ver *version.Version, lang string, opts BuildOpts) (map[strin
 	return pkgs, nil
 }
 
-func createApp(ver *version.Version, lang string) error {
-	path := appPath(ver)
-	if err := os.MkdirAll(path, 0o755); err != nil {
-		return fmt.Errorf("failed to create %s: %w", path, err)
+func createApp(appDir string, ver *version.Version, lang string) error {
+	if err := os.MkdirAll(appDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create %s: %w", appDir, err)
 	}
-	if err := createGoMod(filepath.Join(path, "go.mod"), ver, lang); err != nil {
+	if err := createGoMod(filepath.Join(appDir, "go.mod"), ver, lang); err != nil {
 		return err
 	}
-	if err := createMain(filepath.Join(path, "main.go")); err != nil {
+	if err := createMain(filepath.Join(appDir, "main.go")); err != nil {
 		return err
 	}
-	if err := utils.GoModTidy(path); err != nil {
+	if err := utils.GoModTidy(appDir); err != nil {
 		return err
 	}
 	return nil
@@ -122,6 +121,3 @@ func main() {}
 	return nil
 }
 
-func appPath(ver *version.Version) string {
-	return utils.AppPath()
-}

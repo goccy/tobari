@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/goccy/tobari"
+	"github.com/goccy/tobari/internal/utils"
 )
 
 func (c *CLI) runHTMLCmd(ctx context.Context, args []string) error {
@@ -49,7 +50,7 @@ func (c *CLI) runHTMLCmd(ctx context.Context, args []string) error {
 	// Resolve source directory for -b / -s flags
 	sourceDir := ""
 	if *binary != "" || *sources != "" {
-		tmpDir, err := os.MkdirTemp("", "tobari-html-*")
+		tmpDir, err := os.MkdirTemp("", utils.TmpHTMLDirPattern)
 		if err != nil {
 			return fmt.Errorf("failed to create temp dir: %w", err)
 		}
@@ -93,7 +94,7 @@ func (c *CLI) generateCoverprofileHTML(ctx context.Context, coverprofileContent,
 		coverprofileContent = replacePathsInCoverprofile(coverprofileContent, sourceDir)
 	}
 
-	tmpCoverprofile, err := os.CreateTemp("", "tobari-coverprofile-*.txt")
+	tmpCoverprofile, err := os.CreateTemp("", utils.TmpCoverprofilePattern)
 	if err != nil {
 		return fmt.Errorf("failed to create temp coverprofile: %w", err)
 	}
