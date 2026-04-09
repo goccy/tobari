@@ -202,6 +202,12 @@ func TestCacheBehavior(t *testing.T) {
 			expectedJSON: "expected_tobari.json",
 		},
 		{
+			name:     "synctest",
+			flagsDir: "testdata/synctest",
+			runDir:   "testdata/synctest",
+			hasTest:  true,
+		},
+		{
 			name:     "generic",
 			flagsDir: "testdata/generic",
 			runDir:   "testdata/generic",
