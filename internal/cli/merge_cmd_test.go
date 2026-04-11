@@ -30,11 +30,185 @@ func TestRunMergeCmd_UnknownSubcommand(t *testing.T) {
 	}
 }
 
-func TestRunMergeJSONCmd_TooFewInputs(t *testing.T) {
+func TestRunMergeJSONCmd_NoInputs(t *testing.T) {
 	c := &CLI{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
-	err := c.runMergeJSONCmd(context.Background(), []string{"only-one.json"})
-	if err == nil || !strings.Contains(err.Error(), "at least two input files") {
-		t.Errorf("expected input count error, got: %v", err)
+	err := c.runMergeJSONCmd(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "missing input") {
+		t.Errorf("expected missing input error, got: %v", err)
+	}
+}
+
+func TestClassifyMergeArg(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantKind string
+		wantBase string
+		wantErr  bool
+	}{
+		{"./...", "pattern", ".", false},
+		{"./foo/...", "pattern", "foo", false},
+		{"pkg/...", "pattern", "pkg", false},
+		{"/abs/path/...", "pattern", "/abs/path", false},
+		{"a.json", "file", "", false},
+		{"some/dir/tobari.json", "file", "", false},
+		{"...", "", "", true},
+		{"-o", "", "", true},
+		{"/...", "", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			kind, base, err := classifyMergeArg(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got kind=%q base=%q", kind, base)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if kind != tc.wantKind {
+				t.Errorf("kind = %q, want %q", kind, tc.wantKind)
+			}
+			if base != tc.wantBase {
+				t.Errorf("base = %q, want %q", base, tc.wantBase)
+			}
+		})
+	}
+}
+
+func TestRunMergeJSONCmd_PatternWalk(t *testing.T) {
+	dir := t.TempDir()
+
+	// Two valid tobari.json files under packages.
+	writeJSONAt(t, filepath.Join(dir, "svc1", "tobari", "tobari.json"),
+		minimalReport("TestSvc1", "/src/svc1/main.go"))
+	writeJSONAt(t, filepath.Join(dir, "svc2", "tobari", "tobari.json"),
+		minimalReport("TestSvc2", "/src/svc2/main.go"))
+
+	// Noise that must NOT be picked up.
+	if err := os.MkdirAll(filepath.Join(dir, "svc3"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "svc3", "notes.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// tobari.json directly under a package, parent is not "tobari" dir.
+	writeJSONAt(t, filepath.Join(dir, "svc4", "tobari.json"),
+		minimalReport("TestSvc4", "/src/svc4/main.go"))
+	// vendor/ should be skipped.
+	writeJSONAt(t, filepath.Join(dir, "vendor", "x", "tobari", "tobari.json"),
+		minimalReport("TestVendor", "/src/vendor/main.go"))
+	// Dot-prefixed dir should be skipped.
+	writeJSONAt(t, filepath.Join(dir, ".hidden", "tobari", "tobari.json"),
+		minimalReport("TestHidden", "/src/hidden/main.go"))
+
+	outputPath := filepath.Join(dir, "out.json")
+	var stdout bytes.Buffer
+	c := &CLI{stdout: &stdout, stderr: &bytes.Buffer{}}
+	if err := c.runMergeJSONCmd(context.Background(), []string{
+		"-o", outputPath,
+		filepath.Join(dir, "..."),
+	}); err != nil {
+		t.Fatalf("runMergeJSONCmd() error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Merged 2 reports") {
+		t.Errorf("stdout = %q, want to contain 'Merged 2 reports'", stdout.String())
+	}
+
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("failed to read output: %v", err)
+	}
+	var merged tobari.CoverReport
+	if err := json.Unmarshal(data, &merged); err != nil {
+		t.Fatalf("failed to parse merged output: %v", err)
+	}
+	if len(merged.Counts) != 2 {
+		t.Errorf("counts = %d, want 2 (svc1+svc2 only)", len(merged.Counts))
+	}
+	gotNames := map[string]bool{}
+	for _, cnt := range merged.Counts {
+		gotNames[cnt.Name] = true
+	}
+	for _, want := range []string{"TestSvc1", "TestSvc2"} {
+		if !gotNames[want] {
+			t.Errorf("missing test %q in merged result: %v", want, gotNames)
+		}
+	}
+	for _, bad := range []string{"TestSvc4", "TestVendor", "TestHidden"} {
+		if gotNames[bad] {
+			t.Errorf("unexpected test %q in merged result", bad)
+		}
+	}
+}
+
+func TestRunMergeJSONCmd_PatternMixed(t *testing.T) {
+	dir := t.TempDir()
+
+	writeJSONAt(t, filepath.Join(dir, "a", "tobari", "tobari.json"),
+		minimalReport("TestA", "/src/a/main.go"))
+	writeJSONAt(t, filepath.Join(dir, "extra.json"),
+		minimalReport("TestExtra", "/src/extra/main.go"))
+
+	outputPath := filepath.Join(dir, "out.json")
+	var stdout bytes.Buffer
+	c := &CLI{stdout: &stdout, stderr: &bytes.Buffer{}}
+	if err := c.runMergeJSONCmd(context.Background(), []string{
+		"-o", outputPath,
+		filepath.Join(dir, "a", "..."),
+		filepath.Join(dir, "extra.json"),
+	}); err != nil {
+		t.Fatalf("runMergeJSONCmd() error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Merged 2 reports") {
+		t.Errorf("stdout = %q, want to contain 'Merged 2 reports'", stdout.String())
+	}
+}
+
+func TestRunMergeJSONCmd_PatternDedup(t *testing.T) {
+	dir := t.TempDir()
+
+	writeJSONAt(t, filepath.Join(dir, "a", "b", "tobari", "tobari.json"),
+		minimalReport("TestAB", "/src/ab/main.go"))
+
+	outputPath := filepath.Join(dir, "out.json")
+	var stdout bytes.Buffer
+	c := &CLI{stdout: &stdout, stderr: &bytes.Buffer{}}
+	if err := c.runMergeJSONCmd(context.Background(), []string{
+		"-o", outputPath,
+		filepath.Join(dir, "a", "..."),
+		filepath.Join(dir, "a", "b", "..."),
+	}); err != nil {
+		t.Fatalf("runMergeJSONCmd() error = %v", err)
+	}
+
+	// The single file must not be counted twice.
+	if !strings.Contains(stdout.String(), "Merged 1 reports") {
+		t.Errorf("stdout = %q, want to contain 'Merged 1 reports' (dedup)", stdout.String())
+	}
+}
+
+func TestRunMergeJSONCmd_PatternNoMatches(t *testing.T) {
+	dir := t.TempDir()
+
+	c := &CLI{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
+	err := c.runMergeJSONCmd(context.Background(), []string{
+		"-o", filepath.Join(dir, "out.json"),
+		filepath.Join(dir, "..."),
+	})
+	if err == nil || !strings.Contains(err.Error(), "no tobari/tobari.json files found") {
+		t.Errorf("expected no-matches error, got: %v", err)
+	}
+}
+
+func TestRunMergeJSONCmd_BareEllipsis(t *testing.T) {
+	c := &CLI{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
+	err := c.runMergeJSONCmd(context.Background(), []string{"..."})
+	if err == nil || !strings.Contains(err.Error(), "bare '...'") {
+		t.Errorf("expected bare ellipsis error, got: %v", err)
 	}
 }
 
@@ -291,6 +465,37 @@ func writeJSON(t *testing.T, dir, name string, report tobari.CoverReport) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// writeJSONAt writes a CoverReport as JSON to the given absolute path,
+// creating parent directories as needed.
+func writeJSONAt(t *testing.T, path string, report tobari.CoverReport) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// minimalReport returns a minimal valid CoverReport for pattern-walk tests.
+func minimalReport(testName, file string) tobari.CoverReport {
+	return tobari.CoverReport{
+		Metadata: tobari.CoverReportMetadata{
+			Files: []string{file},
+			Entry: []string{"FileName", "StartLine", "StartCol", "EndLine", "EndCol", "StatementCount"},
+			All:   [][]int{{0, 1, 1, 2, 1, 1}},
+		},
+		Counts: []*tobari.CoverReportCount{
+			{Name: testName, Coverprofile: [][]int{{0, 1}}},
+		},
+		AllCounts: []int{1},
 	}
 }
 
