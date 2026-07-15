@@ -24,6 +24,10 @@ Flags:
 Flags Command Options:
     --embed-code, -E    Embed original source code into the instrumented binary
     -tags=VALUE         Build tags (same as go build -tags)
+    -exclude-analysis=PKGS
+                        Comma-separated package path prefixes to exclude from the
+                        whole-program dependency analysis. Only exclude packages
+                        that never call back into coverage-target code.
 
 HTML Command Options:
     -o <file>           Output HTML file path (default: cover.html)
@@ -49,6 +53,9 @@ Merge Command:
 
 Toolexec Options (used with -toolexec):
     --embed-code        Embed original source code into the instrumented binary
+    --exclude-analysis=PKGS
+                        Comma-separated package path prefixes to exclude from the
+                        whole-program dependency analysis
 
 Examples:
     # Get flags for go build

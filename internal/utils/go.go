@@ -47,7 +47,6 @@ const (
 	TmpHTMLDirPattern = "tobari_html_*"
 )
 
-
 func GoRoot() (string, error) {
 	// check GOROOT environment variable first (set by toolchain switching)
 	if root := os.Getenv("GOROOT"); root != "" {
@@ -219,9 +218,11 @@ func GoListDepsJSON(dir string, isTest bool, pkg string) ([]byte, error) {
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
 	cmd.Env = FilterGOFLAGSEnvs()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("failed to run go list -deps: %w", err)
+		return nil, fmt.Errorf("failed to run go list -deps in %s: %w: %s", dir, err, strings.TrimSpace(stderr.String()))
 	}
 	return out, nil
 }
@@ -259,6 +260,29 @@ func FilterGOFLAGSEnvs() []string {
 		newEnvs = append(newEnvs, kv)
 	}
 	return newEnvs
+}
+
+// ParsePkgPrefixes splits a comma-separated list of package-path prefixes,
+// trimming whitespace and dropping empty entries.
+func ParsePkgPrefixes(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// MatchesPkgPrefix reports whether pkgPath equals one of the prefixes or is a
+// subpackage of one (prefix + "/").
+func MatchesPkgPrefix(pkgPath string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if pkgPath == p || strings.HasPrefix(pkgPath, p+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // ImportsFromSource extracts import packages from Go source.

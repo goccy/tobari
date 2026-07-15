@@ -2,6 +2,8 @@ package tool
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,7 +39,7 @@ func Handle(ctx context.Context, args []string, opts BuildOpts) error {
 			return err
 		}
 	case "cover":
-		if err := handleCover(ctx, toolPath, toolArgs, opts.EmbedCode); err != nil {
+		if err := handleCover(ctx, toolPath, toolArgs, opts.EmbedCode, opts.ExcludeAnalysis); err != nil {
 			return err
 		}
 	default:
@@ -83,7 +85,28 @@ func handleVersionFull(ctx context.Context, toolPath string, args []string, opts
 	// - opt: invalidates cache when toolexec options change (e.g., --embed-code)
 	// Note: trimpath and race are excluded from opt because they are detected later
 	// from compiler args and Go already includes them in its own cache key.
-	fmt.Printf("%s tobari:[version:%s overlay:%s opt:%s]\n",
-		strings.TrimSpace(string(org)), ver.ID(), overlayHash, opts.Hash())
+	ident := fmt.Sprintf("version:%s overlay:%s opt:%s", ver.ID(), overlayHash, opts.Hash())
+
+	// -exclude-analysis only changes the suppDeps produced by the cover tool, so
+	// it is folded into the *cover* tool's identity alone. Go probes -V=full per
+	// tool, and each tool's identity feeds the actionID of the packages built
+	// with it. Adding this to the compile tool's identity instead would
+	// invalidate the entire dependency closure, even though only the
+	// cover-instrumented packages and main can change.
+	//
+	// It cannot be handled at compile time instead: on a cache hit Go skips the
+	// toolexec invocation entirely, so nothing written during compile can affect
+	// the hit/miss decision. The identity probe is the only pre-action input.
+	if filepath.Base(toolPath) == "cover" && len(opts.ExcludeAnalysis) != 0 {
+		ident += " exclude-analysis:" + hashStrings(opts.ExcludeAnalysis)
+	}
+
+	fmt.Printf("%s tobari:[%s]\n", strings.TrimSpace(string(org)), ident)
 	return nil
+}
+
+// hashStrings returns a short stable hash of a string slice.
+func hashStrings(v []string) string {
+	h := sha256.Sum256([]byte(strings.Join(v, "\x00")))
+	return hex.EncodeToString(h[:])[:16]
 }

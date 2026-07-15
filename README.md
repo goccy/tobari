@@ -139,6 +139,42 @@ GOFLAGS="$(tobari flags -tags=timetzdata)" go build .
 This example shows distinguishing coverage results by name, but you can also use it the same way as `runtime/coverage`.
 For specific APIs, please [refer here](https://pkg.go.dev/github.com/goccy/tobari).
 
+### Speeding Up the Dependency Analysis
+
+When the main package is built, tobari runs a whole-program call-graph analysis
+(RTA) to determine which lines are reachable from each coverage-target function.
+This analysis is superlinear in the number of reachable types and interface call
+sites, so a dependency closure containing a large amount of generated code — such
+as gRPC/protobuf clients — can make it slow.
+
+If your build takes too long and you know which packages are irrelevant to the
+analysis, `--exclude-analysis` can help. It takes comma-separated package path
+prefixes to leave out:
+
+```console
+GOFLAGS="$(tobari flags -exclude-analysis=github.com/org/repo)" go build .
+
+# Multiple prefixes
+GOFLAGS="$(tobari flags -exclude-analysis=github.com/org/repo,github.com/org/other)" go build .
+```
+
+A prefix matches the package itself and everything beneath it, so a single entry
+can exclude a whole generated tree, while a deeper prefix excludes just one
+sub-package.
+
+Coverage-target packages (those instrumented via `-coverpkg`, `go test ./...`, and
+so on) and the main package are never excluded, even if a prefix matches them:
+they are what the analysis exists to measure. Naming one is silently ignored.
+
+> **Correctness requirement**: only exclude packages that never call back into a
+> coverage-target package — that is, packages you never hand a callback, an
+> interface value, or any other value carrying your code. Generated gRPC clients
+> that only marshal request/response data qualify. If an excluded package *does*
+> call back into coverage-target code, the dependency edges through it are lost
+> and coverage denominators will be too small. Excluding a package changes the
+> build cache key for coverage-instrumented packages only, so toggling it
+> rebuilds those without invalidating the rest of the dependency closure.
+
 ### Embedding Source Code
 
 Tobari supports embedding the original source code into instrumented binaries with the `--embed-code` (`-E`) option. This is useful for archiving the exact source that was compiled, enabling offline coverage analysis without access to the original source tree.

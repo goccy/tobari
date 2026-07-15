@@ -27,7 +27,7 @@ import (
 	"github.com/goccy/tobari/internal/utils"
 )
 
-func Run(ctx context.Context, args []string, embedCode bool) error {
+func Run(ctx context.Context, args []string, embedCode bool, excludeAnalysis []string) error {
 	inputFiles, opt, err := parseOption(args)
 	if err != nil {
 		return err
@@ -75,7 +75,7 @@ func Run(ctx context.Context, args []string, embedCode bool) error {
 		// Write suppDeps to the $WORK/bNNN/ directory alongside _testmain.go.
 		// This prevents races when go test ./... builds multiple packages in
 		// parallel, as each package gets its own isolated file.
-		if err := createAndWriteSuppDeps(nil, true, pkgcfg, filepath.Dir(inputFiles[0])); err != nil {
+		if err := createAndWriteSuppDeps(nil, true, pkgcfg, filepath.Dir(inputFiles[0]), excludeAnalysis); err != nil {
 			return err
 		}
 	} else if pkgcfg.PkgName == "main" {
@@ -99,7 +99,7 @@ func Run(ctx context.Context, args []string, embedCode bool) error {
 			if opt.pkgcfg != "" {
 				workDir = filepath.Dir(opt.pkgcfg)
 			}
-			if err := createAndWriteSuppDeps(inputFiles, false, nil, workDir); err != nil {
+			if err := createAndWriteSuppDeps(inputFiles, false, nil, workDir, excludeAnalysis); err != nil {
 				return err
 			}
 		}
@@ -1225,8 +1225,8 @@ func (b *Buffer) Bytes() []byte {
 // testPkgCfg provides the package config for directory resolution.
 // workDir, when non-empty, specifies the directory to write the suppDeps
 // file to (used in testmain mode to avoid races in parallel builds).
-func createAndWriteSuppDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *PackageConfig, workDir string) error {
-	suppDeps, err := CreateMainDeps(mainSourceFiles, isTestMode, testPkgCfg)
+func createAndWriteSuppDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *PackageConfig, workDir string, excludeAnalysis []string) error {
+	suppDeps, err := CreateMainDeps(mainSourceFiles, isTestMode, testPkgCfg, excludeAnalysis)
 	if err != nil {
 		return err
 	}
