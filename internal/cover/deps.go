@@ -330,7 +330,15 @@ func collectAnonymFuncsFromInfo(fset *token.FileSet, file *ast.File, body *ast.B
 // so that RTA can trace call edges through third-party libraries.
 // For test mode, -test is added to go list to include test dependencies.
 // Returns nil if no coverage-target packages are found.
-func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *PackageConfig) (map[string][]string, error) {
+//
+// excludeAnalysis lists package-path prefixes whose SSA bodies are not built,
+// making RTA treat them as opaque leaves. This is a caller assertion that the
+// excluded packages never call back into coverage-target code (see the
+// --exclude-analysis flag). It exists because whole-program RTA is superlinear
+// in the number of reachable types and interface call sites: on large services
+// the generated gRPC/protobuf client packages dominate the analysis while
+// contributing no cover→cover edges.
+func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *PackageConfig, excludeAnalysis []string) (map[string][]string, error) {
 	tobariBin, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tobari binary path: %w", err)
@@ -420,19 +428,44 @@ func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *Packa
 
 	prog, _ := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics)
 
-	// Build SSA for ALL packages.
-	prog.Build()
+	if len(excludeAnalysis) == 0 {
+		// Build SSA for ALL packages.
+		prog.Build()
+	} else {
+		// Build SSA for every package except the excluded ones. Excluded
+		// packages stay bodyless, so RTA cannot trace calls through them; the
+		// caller asserts they never re-enter cover code.
+		for _, ssaPkg := range prog.AllPackages() {
+			if ssaPkg.Pkg == nil {
+				continue
+			}
+			if !isMainPkg(ssaPkg) && isExcludedFromAnalysis(ssaPkg.Pkg.Path(), excludeAnalysis, coverPkgSet) {
+				continue
+			}
+			ssaPkg.Build()
+		}
+	}
 
 	// Collect RTA roots from main/test packages and cover-target packages.
+	//
+	// The iteration order must be deterministic: prog.AllPackages() and
+	// ssa.Package.Members are backed by maps, and rta.Analyze gives roots[0]
+	// special treatment (callgraph.New(roots[0]) is the only place a node is
+	// created for a root that has no call edges). An unstable order therefore
+	// makes edge-less roots appear in, or vanish from, the resulting suppDeps.
+	ssaPkgs := prog.AllPackages()
+	sort.Slice(ssaPkgs, func(i, j int) bool {
+		return ssaPkgPath(ssaPkgs[i]) < ssaPkgPath(ssaPkgs[j])
+	})
+
 	var roots []*ssa.Function
-	for _, ssaPkg := range prog.AllPackages() {
+	for _, ssaPkg := range ssaPkgs {
 		if ssaPkg.Pkg == nil {
 			continue
 		}
 		pkgPath := ssaPkg.Pkg.Path()
-		isMainOrTest := pkgPath == "main" || strings.HasSuffix(pkgPath, ".test") || strings.Contains(pkgPath, " [")
 		_, isCoverTarget := coverPkgSet[pkgPath]
-		if !isMainOrTest && !isCoverTarget {
+		if !isMainOrTestPkg(pkgPath) && !isMainPkg(ssaPkg) && !isCoverTarget {
 			continue
 		}
 		if mainFunc := ssaPkg.Func("main"); mainFunc != nil {
@@ -441,8 +474,13 @@ func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *Packa
 		if initFunc := ssaPkg.Func("init"); initFunc != nil {
 			roots = append(roots, initFunc)
 		}
-		for name, member := range ssaPkg.Members {
-			fn, ok := member.(*ssa.Function)
+		names := make([]string, 0, len(ssaPkg.Members))
+		for name := range ssaPkg.Members {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			fn, ok := ssaPkg.Members[name].(*ssa.Function)
 			if !ok {
 				continue
 			}
@@ -464,20 +502,73 @@ func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *Packa
 	graph := rtaResult.CallGraph
 
 	// Build dependency map for coverage-target packages.
+	//
+	// Iterate the reachable set rather than the call graph's nodes: RTA only
+	// creates a graph node for a function that participates in a call edge (plus
+	// roots[0], which callgraph.New materializes). A reachable cover function
+	// with no cover-relevant edges would otherwise be included or omitted
+	// depending on where it happened to land in the root list.
 	suppDeps := make(map[string][]string)
-	for _, n := range graph.Nodes {
-		if n.Func == nil {
+	for fn := range rtaResult.Reachable {
+		if funcCoverPkgPath(fn, coverPkgSet) == "" {
 			continue
 		}
-		if funcCoverPkgPath(n.Func, coverPkgSet) == "" {
-			continue
+		fnName := normalizeFuncName(fn)
+		var deps []string
+		if n := graph.Nodes[fn]; n != nil {
+			deps = analyzeMainFuncDeps(coverPkgSet, n)
 		}
-		fnName := normalizeFuncName(n.Func)
-		deps := analyzeMainFuncDeps(coverPkgSet, n)
 		suppDeps[fnName] = mergeDeps(suppDeps[fnName], deps)
 	}
 
 	return suppDeps, nil
+}
+
+// isExcludedFromAnalysis reports whether a package's SSA body may be skipped.
+//
+// A package is excluded only when it matches one of the caller's prefixes AND
+// it is not needed to produce the dependency map. Coverage-target packages and
+// the main/test entry points are never excluded, even if a prefix matches them:
+// they are the source of the cover→cover edges the analysis exists to find, and
+// dropping their bodies would silently shrink coverage denominators. Since
+// --exclude-analysis is meant for packages irrelevant to the analysis, naming a
+// coverage target is a user mistake that is ignored rather than honored.
+func isExcludedFromAnalysis(pkgPath string, excludeAnalysis []string, coverPkgSet map[string]struct{}) bool {
+	if !utils.MatchesPkgPrefix(pkgPath, excludeAnalysis) {
+		return false
+	}
+	if isMainOrTestPkg(pkgPath) {
+		return false
+	}
+	// matchCoverPkg also resolves test variants ("pkg [pkg.test]").
+	return matchCoverPkg(pkgPath, coverPkgSet) == ""
+}
+
+// isMainOrTestPkg reports whether a package path denotes the main package or a
+// test binary / test variant package.
+//
+// Note that a main package's import path is normally its module path, not the
+// literal "main"; use isMainPkg when an *ssa.Package is available.
+func isMainOrTestPkg(pkgPath string) bool {
+	return pkgPath == "main" ||
+		strings.HasSuffix(pkgPath, ".test") ||
+		strings.Contains(pkgPath, " [")
+}
+
+// isMainPkg reports whether an SSA package is a main package. This checks the
+// package name because `go list` reports a main package's import path as its
+// module path (e.g. "example.com/app"), not "main".
+func isMainPkg(ssaPkg *ssa.Package) bool {
+	return ssaPkg.Pkg != nil && ssaPkg.Pkg.Name() == "main"
+}
+
+// ssaPkgPath returns an SSA package's import path, or "" for the synthetic
+// package with no types.Package. Used to sort packages deterministically.
+func ssaPkgPath(ssaPkg *ssa.Package) string {
+	if ssaPkg.Pkg == nil {
+		return ""
+	}
+	return ssaPkg.Pkg.Path()
 }
 
 // coverPkgSetResult holds cover package paths discovered from the global cache.
@@ -549,7 +640,11 @@ func resolveGoListDir(mainSourceFiles []string, testPkgCfg *PackageConfig) (stri
 			if err := json.Unmarshal(data, &cache); err != nil || cache.Dir == "" {
 				continue
 			}
-			if modulePath != "" && !strings.HasPrefix(cache.PkgPath, modulePath) {
+			// Match on package-path boundaries. A plain prefix test would let
+			// module "example.com/foo" claim the cover targets of the unrelated
+			// module "example.com/foobar", whose entries share the same global
+			// cache. Picking a foreign directory then yields a bogus go list dir.
+			if modulePath != "" && !utils.MatchesPkgPrefix(cache.PkgPath, []string{modulePath}) {
 				continue
 			}
 			if cache.PkgPath == lookupPath {

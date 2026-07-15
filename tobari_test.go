@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -1002,4 +1003,130 @@ func createTestTarGzData(t *testing.T, files map[string]string) []byte {
 		t.Fatalf("close gzip writer: %v", err)
 	}
 	return buf.Bytes()
+}
+
+// TestSuppDepsDeterministic verifies that repeated builds of the same program
+// produce identical supplementary dependency data.
+//
+// The analysis derives its roots from maps (ssa.Program.AllPackages and
+// ssa.Package.Members), and rta.Analyze materializes a call-graph node for
+// roots[0] even when that root has no call edges. An unstable root order
+// therefore used to add or drop entries from suppDeps between builds, silently
+// changing coverage denominators.
+func TestSuppDepsDeterministic(t *testing.T) {
+	ctx := t.Context()
+	tobariBin := filepath.Join(t.TempDir(), "tobari")
+
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+
+	const runs = 5
+	var first string
+	for i := range runs {
+		got := buildCrosspkgSuppDeps(t, ctx, tobariBin, "")
+		if i == 0 {
+			first = got
+			continue
+		}
+		if got != first {
+			t.Fatalf("suppDeps differ between builds\nrun 1: %s\nrun %d: %s", first, i+1, got)
+		}
+	}
+}
+
+// TestExcludeAnalysisIgnoresCoverTargets verifies that naming a coverage-target
+// package in --exclude-analysis is ignored: its SSA is still built and its
+// dependency edges are preserved. Excluding a genuinely irrelevant package, by
+// contrast, must not affect a coverage target's edges either. In both cases the
+// suppDeps must equal the baseline (no exclusion) for this program, whose cover
+// targets only pass plain data across package boundaries.
+func TestExcludeAnalysisIgnoresCoverTargets(t *testing.T) {
+	ctx := t.Context()
+	tobariBin := filepath.Join(t.TempDir(), "tobari")
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+
+	baseline := buildCrosspkgSuppDeps(t, ctx, tobariBin, "")
+
+	tests := []struct {
+		name    string
+		exclude string
+	}{
+		{"exclude a coverage-target package (must be ignored)", "example.com/crosspkg/transform"},
+		{"exclude all coverage-target packages (all ignored)", "example.com/crosspkg"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildCrosspkgSuppDeps(t, ctx, tobariBin, tt.exclude)
+			if got != baseline {
+				t.Errorf("excluding %q changed suppDeps (coverage target should be ignored)\nbaseline: %s\ngot:      %s",
+					tt.exclude, baseline, got)
+			}
+		})
+	}
+}
+
+// buildCrosspkgSuppDeps builds testdata/crosspkg with tobari and returns the
+// suppDeps JSON embedded in the resulting binary. A fresh Go build cache forces
+// the cover tool (and thus the analysis) to run again; a fresh cover-package
+// cache keeps the discovered coverage targets identical across builds. When
+// excludeAnalysis is non-empty it is passed via --exclude-analysis.
+func buildCrosspkgSuppDeps(t *testing.T, ctx context.Context, tobariBin, excludeAnalysis string) string {
+	t.Helper()
+	if err := os.RemoveAll(coverPkgsDir()); err != nil {
+		t.Fatalf("failed to clear cover pkg cache: %v", err)
+	}
+	toolexec := tobariBin
+	if excludeAnalysis != "" {
+		toolexec += " --exclude-analysis=" + excludeAnalysis
+	}
+	bin := filepath.Join(t.TempDir(), "app")
+	cmd := exec.CommandContext(ctx, "go", "build",
+		"-cover", "-toolexec="+toolexec, "-o", bin, ".")
+	cmd.Dir = "testdata/crosspkg"
+	cmd.Env = append(os.Environ(), "GOCACHE="+t.TempDir())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build failed: %s: %v", string(out), err)
+	}
+	return extractSuppDeps(t, bin)
+}
+
+// coverPkgsDir mirrors utils.CoverPkgsDir, which is in an internal package.
+func coverPkgsDir() string {
+	return filepath.Join(os.TempDir(), "tobari", "coverpkgs")
+}
+
+// extractSuppDeps returns the suppDeps JSON object embedded in a tobari-built
+// binary. The cover tool serializes the map and the compile tool bakes it in as
+// a string literal, so it appears verbatim in the binary's data section.
+func extractSuppDeps(t *testing.T, binPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(binPath)
+	if err != nil {
+		t.Fatalf("failed to read binary: %v", err)
+	}
+	// Locate the JSON object whose first key is a crosspkg function.
+	marker := []byte(`{"`)
+	for i := 0; i+len(marker) < len(data); i++ {
+		if !bytes.HasPrefix(data[i:], marker) {
+			continue
+		}
+		end := bytes.IndexByte(data[i:], '}')
+		if end < 0 {
+			continue
+		}
+		candidate := data[i : i+end+1]
+		if !bytes.Contains(candidate, []byte("example.com/crosspkg")) {
+			continue
+		}
+		var m map[string][]string
+		if err := json.Unmarshal(candidate, &m); err != nil {
+			continue // a nested object; keep scanning
+		}
+		return string(candidate)
+	}
+	t.Fatal("suppDeps not found in binary")
+	return ""
 }

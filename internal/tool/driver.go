@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
@@ -127,8 +128,14 @@ func HandlePackagesDriver(ctx context.Context, patterns []string) error {
 
 	// Build roots: main package, cover targets, and test packages.
 	rootSet := make(map[string]struct{})
-	if _, ok := pkgMap["main"]; ok {
-		rootSet["main"] = struct{}{}
+	// The main package must be identified by its package name, not by its
+	// import path: `go list` reports a main package's ImportPath as its module
+	// path (e.g. "example.com/app"), never the literal "main". Without this the
+	// main package is not loaded at all, so RTA cannot trace from main.
+	for _, glp := range goListPkgs {
+		if glp.Name == "main" {
+			rootSet[glp.ImportPath] = struct{}{}
+		}
 	}
 	for pkgPath := range coverPkgPaths {
 		if _, ok := pkgMap[pkgPath]; ok {
@@ -146,6 +153,9 @@ func HandlePackagesDriver(ctx context.Context, patterns []string) error {
 	for id := range rootSet {
 		roots = append(roots, id)
 	}
+	// Deterministic order: packages.Load's roots feed RTA root ordering, and
+	// callgraph.New(roots[0]) treats the first root specially.
+	sort.Strings(roots)
 
 	var pkgList []*packages.Package
 	for _, dp := range pkgMap {

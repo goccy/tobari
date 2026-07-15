@@ -36,9 +36,11 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 	tobariBinPath := args[0]
 
 	// Parse tobari-specific flags before the tool path.
-	// When invoked as: tobari [--embed-code] [--build-tags=VALUE] /path/to/compile <args>
+	// When invoked as: tobari [--embed-code] [--build-tags=VALUE]
+	//                         [--exclude-analysis=PREFIX,...] /path/to/compile <args>
 	embedCode := false
 	buildTags := ""
+	var excludeAnalysis []string
 	i := 1
 	for i < len(args) {
 		if args[i] == "--embed-code" {
@@ -46,6 +48,9 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 			i++
 		} else if strings.HasPrefix(args[i], "--build-tags=") {
 			buildTags = strings.TrimPrefix(args[i], "--build-tags=")
+			i++
+		} else if strings.HasPrefix(args[i], "--exclude-analysis=") {
+			excludeAnalysis = utils.ParsePkgPrefixes(strings.TrimPrefix(args[i], "--exclude-analysis="))
 			i++
 		} else {
 			break
@@ -69,8 +74,9 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 	// toolexec passes Go tool's absolute path as args[1]
 	if isToolexecCall(arg1) {
 		return tool.Handle(ctx, args, tool.BuildOpts{
-			EmbedCode: embedCode,
-			BuildTags: buildTags,
+			EmbedCode:       embedCode,
+			BuildTags:       buildTags,
+			ExcludeAnalysis: excludeAnalysis,
 		})
 	}
 

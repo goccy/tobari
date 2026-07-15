@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-func Run(ctx context.Context, tobariBinPath string, embedCode bool, tags string) (string, error) {
+func Run(ctx context.Context, tobariBinPath string, embedCode bool, tags, excludeAnalysis string) (string, error) {
 	path, err := exec.LookPath(tobariBinPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to find tobari binary path from %s: %w", tobariBinPath, err)
@@ -26,6 +26,9 @@ func Run(ctx context.Context, tobariBinPath string, embedCode bool, tags string)
 	}
 	if tags != "" {
 		toolexecValue += " --build-tags=" + tags
+	}
+	if excludeAnalysis != "" {
+		toolexecValue += " --exclude-analysis=" + excludeAnalysis
 	}
 	toolexecFlag := "-toolexec=" + toolexecValue
 	if strings.Contains(toolexecValue, " ") {

@@ -23,6 +23,9 @@ func tobariToolexec(opts BuildOpts) (string, error) {
 	if opts.BuildTags != "" {
 		v += " --build-tags=" + opts.BuildTags
 	}
+	if len(opts.ExcludeAnalysis) != 0 {
+		v += " --exclude-analysis=" + strings.Join(opts.ExcludeAnalysis, ",")
+	}
 	return v, nil
 }
 
