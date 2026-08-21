@@ -108,11 +108,15 @@ func handleCompile(ctx context.Context, toolPath string, args []string, opts Bui
 		// running `go list -deps -export` (which is slow and creates the
 		// per-build app dir) would be wasted work.
 		if importCfgPath := getImportcfgPathFromArgs(args); importCfgPath != "" && !importcfgHasTobari(importCfgPath) {
-			pkgs, err := getTobariPkgs(args, opts)
+			ver, err := effectiveTobariVersion()
+			if err != nil {
+				return err
+			}
+			pkgs, err := getTobariPkgs(args, opts, ver)
 			if err != nil {
 				return fmt.Errorf("failed to build tobari packages: %w", err)
 			}
-			if err := saveTobariPkgsCache(importCfgPath, pkgs); err != nil {
+			if err := saveTobariPkgsCache(importCfgPath, pkgs, ver.ID()); err != nil {
 				return err
 			}
 			if err := overwriteImportcfg(importCfgPath, pkgs); err != nil {
@@ -204,7 +208,11 @@ SEARCH_TOBARI_PKG_END:
 		return nil
 	}
 
-	pkgs, err := getTobariPkgs(args, opts)
+	ver, err := effectiveTobariVersion()
+	if err != nil {
+		return err
+	}
+	pkgs, err := getTobariPkgs(args, opts, ver)
 	if err != nil {
 		return err
 	}

@@ -42,7 +42,7 @@ Content-hash-keyed caches that survive Go build cache hits (when the cover/compi
 
 | Directory | Key | Purpose |
 |---|---|---|
-| `cache/` | Runtime export filename (SHA256) | tobari package export paths by build config |
+| `cache/` | Runtime export filename (SHA256) + tobari version ID | tobari package export paths by build config and tobari resolution |
 | `coverpkgs/` | Package directory path (SHA256) | Registry of coverage-target packages |
 | `overlay/<content_hash>/` | Overlay file content (SHA256, 16 chars) | Modified runtime/testing/testdeps packages |
 

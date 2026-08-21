@@ -1130,3 +1130,116 @@ func extractSuppDeps(t *testing.T, binPath string) string {
 	t.Fatal("suppDeps not found in binary")
 	return ""
 }
+
+// TestPkgsCacheIsolationAcrossTobariVersions verifies that the global tobari
+// pkgs cache keeps entries from builds that resolve tobari differently
+// isolated from each other. A module may pin tobari via a go.mod replace
+// directive while other builds on the same machine resolve the tobari
+// binary's own version; both share one build configuration (one runtime
+// export file), but the pinned module's tobari packages have different
+// fingerprints. If one build's cache entry can clobber the other's,
+// relinking the pinned module from a warm build cache links against the
+// wrong tobari and fails with a fingerprint mismatch.
+func TestPkgsCacheIsolationAcrossTobariVersions(t *testing.T) {
+	ctx := t.Context()
+	tobariBin := filepath.Join(t.TempDir(), "tobari")
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+
+	// Copy the runtime subset of the tobari module to a separate path. The
+	// copy is source-identical but its packages get different fingerprints
+	// because export data embeds source file positions.
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tobariCopy := filepath.Join(t.TempDir(), "tobari-copy")
+	if err := os.MkdirAll(filepath.Join(tobariCopy, "internal", "tobari"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"go.mod", "go.sum", "tobari.go", filepath.Join("internal", "tobari", "tobari.go")} {
+		data, err := os.ReadFile(filepath.Join(repoRoot, f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tobariCopy, f), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// An app that pins tobari to the copy, mirroring testdata/crosspkg's
+	// pattern: tobari is pinned in go.mod so the injected import resolves to
+	// the pinned path, but no source file imports it.
+	appDir := filepath.Join(t.TempDir(), "app")
+	if err := os.MkdirAll(appDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	appGoMod := fmt.Sprintf(`module example.com/versionpin
+
+go 1.24.0
+
+require github.com/goccy/tobari v0.0.0
+
+replace github.com/goccy/tobari => %s
+`, tobariCopy)
+	appGoSum, err := os.ReadFile(filepath.Join(repoRoot, "testdata", "crosspkg", "go.sum"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appMain := `package main
+
+import "fmt"
+
+func greeting() string {
+	return "hello"
+}
+
+func main() {
+	fmt.Println(greeting())
+}
+`
+	appTest := `package main
+
+import "testing"
+
+func TestGreeting(t *testing.T) {
+	if greeting() != "hello" {
+		t.Fatal("unexpected greeting")
+	}
+}
+`
+	for name, content := range map[string][]byte{
+		"go.mod":       []byte(appGoMod),
+		"go.sum":       appGoSum,
+		"main.go":      []byte(appMain),
+		"main_test.go": []byte(appTest),
+	} {
+		if err := os.WriteFile(filepath.Join(appDir, name), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	gocache := t.TempDir()
+	run := func(dir string, goArgs ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, "go", goArgs...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GOCACHE="+gocache,
+			"GOFLAGS=-cover -toolexec="+tobariBin,
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("go %s failed in %s: %s: %v", strings.Join(goArgs, " "), dir, string(out), err)
+		}
+	}
+
+	// Cold build of the pinned app writes its pkgs-cache entry.
+	run(appDir, "test", "-count=1", ".")
+	// A build resolving the binary's tobari version shares the same build
+	// configuration and must not clobber the pinned app's cache entry.
+	run(filepath.Join(repoRoot, "testdata", "initfunc"), "run", "main.go")
+	// Relink the pinned app from the warm build cache: the link phase must
+	// find the pinned tobari packages again.
+	run(appDir, "test", "-count=1", ".")
+}
