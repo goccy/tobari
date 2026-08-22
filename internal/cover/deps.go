@@ -507,20 +507,22 @@ func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *Packa
 	rtaResult := rta.Analyze(roots, true)
 	graph := rtaResult.CallGraph
 
-	// RTA resolves a dynamic function-value call (e.g. sync.Once's f())
-	// purely by signature: every address-taken function with a matching
-	// signature becomes a callee. One such call site inside a shared helper
-	// therefore fans out to hundreds of unrelated functions — including test
-	// and Example bodies, whose addresses the test harness takes — and drags
-	// provably unreachable code into every caller's dependency closure.
-	// Interface dispatch (invoke mode) and static calls are unaffected and
-	// stay resolved by RTA, which handles instantiated generics correctly.
+	// RTA resolves dynamic calls far too broadly for scoped coverage: a
+	// function-value call (e.g. sync.Once's f()) is resolved purely by
+	// signature — every address-taken function with a matching signature
+	// becomes a callee, fanning one shared-helper call site out to hundreds
+	// of unrelated functions, including test and Example bodies — and
+	// interface dispatch is resolved to every implementation in the binary.
 	//
-	// To keep the reachability judgment sound for function values, build a
-	// VTA call graph over the RTA-reachable functions and use it to confirm
-	// dynamic function-value edges: VTA propagates which functions actually
-	// flow into each call site, so a callback passed from cover code is kept
-	// while signature-only matches are dropped.
+	// To keep the reachability judgment sound, build a VTA call graph over
+	// the RTA-reachable functions and use it during dependency extraction to
+	// confirm dynamic edges (both function-value calls and interface
+	// dispatch): VTA propagates which values actually flow into each call
+	// site, so a callback or implementation passed from user code is kept
+	// while signature-only and every-implementation matches are dropped.
+	// Static calls, and invoke edges whose callee is a generic
+	// instantiation (a VTA blind spot), stay resolved by RTA — see
+	// followEdge for the exact policy.
 	vtaFuncs := make(map[*ssa.Function]bool, len(rtaResult.Reachable))
 	for fn := range rtaResult.Reachable {
 		vtaFuncs[fn] = true
