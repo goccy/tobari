@@ -1131,6 +1131,34 @@ func extractSuppDeps(t *testing.T, binPath string) string {
 	return ""
 }
 
+// TestCoverageRuntimeRaceClean verifies that the coverage runtime injected into
+// user binaries is race-clean when coverage is queried from concurrent
+// goroutines. The repository's own `go test -race` cannot observe that runtime
+// because it executes inside tobari-built child binaries, so this test builds
+// testdata/concurrentquery with tobari and runs its test under the race
+// detector. A fresh build cache and cover-package cache force the cover tool
+// and the whole-program dependency analysis to run, so the supplementary deps
+// are populated — the runtime's dependency-resolution path is exercised only
+// when they are.
+func TestCoverageRuntimeRaceClean(t *testing.T) {
+	ctx := t.Context()
+	tobariBin := filepath.Join(t.TempDir(), "tobari")
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+	if err := os.RemoveAll(coverPkgsDir()); err != nil {
+		t.Fatalf("failed to clear cover pkg cache: %v", err)
+	}
+	cmd := exec.CommandContext(ctx, "go", "test", "-race", "-count=1",
+		"-cover", "-toolexec="+tobariBin,
+		"-coverpkg=example.com/concurrentquery/...", ".")
+	cmd.Dir = "testdata/concurrentquery"
+	cmd.Env = append(os.Environ(), "GOCACHE="+t.TempDir())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go test -race failed: %s: %v", string(out), err)
+	}
+}
+
 // TestPkgsCacheIsolationAcrossTobariVersions verifies that the global tobari
 // pkgs cache keeps entries from builds that resolve tobari differently
 // isolated from each other. A module may pin tobari via a go.mod replace

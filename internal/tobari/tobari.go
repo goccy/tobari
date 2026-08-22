@@ -237,20 +237,9 @@ func resolveCandidateFuncMap(fn *Function, fnMap map[*Function]struct{}) {
 	}
 
 	fnMap[fn] = struct{}{}
-	funcMapMu.RLock()
-	for _, dep := range fn.Deps {
-		ref, exists := funcMap[dep]
-		if !exists {
-			// funcMap is the ground truth for packages instrumented in this
-			// binary (populated via AddCoverMeta at init time). suppDeps may
-			// reference functions from packages that are in the global cover
-			// cache but not instrumented in this binary. Use funcMap as the
-			// runtime coverPkgSet and skip deps outside of it.
-			continue
-		}
-		fn.DepRefs = append(fn.DepRefs, ref)
-	}
-	funcMapMu.RUnlock()
+	// DepRefs is resolved once by decodeRawMetas and immutable afterwards, so
+	// this traversal is safe without locking even when multiple goroutines
+	// build coverprofiles concurrently.
 	for _, ref := range fn.DepRefs {
 		resolveCandidateFuncMap(ref, fnMap)
 	}
@@ -666,6 +655,28 @@ func decodeRawMetas() {
 			pendingSuppDeps = nil
 		}
 		pendingSuppDepsMu.Unlock()
+
+		// Resolve Deps into DepRefs exactly once. DepRefs must not be built
+		// lazily at query time: coverprofile queries run concurrently, and
+		// appending to a shared Function from multiple goroutines corrupts
+		// the slice. After this point DepRefs is immutable.
+		funcMapMu.Lock()
+		for _, fn := range funcMap {
+			for _, dep := range fn.Deps {
+				ref, exists := funcMap[dep]
+				if !exists {
+					// funcMap is the ground truth for packages instrumented
+					// in this binary (populated via AddCoverMeta at init
+					// time). suppDeps may reference functions from packages
+					// that are in the global cover cache but not instrumented
+					// in this binary. Use funcMap as the runtime coverPkgSet
+					// and skip deps outside of it.
+					continue
+				}
+				fn.DepRefs = append(fn.DepRefs, ref)
+			}
+		}
+		funcMapMu.Unlock()
 	})
 }
 
