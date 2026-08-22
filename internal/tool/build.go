@@ -29,20 +29,29 @@ func tobariToolexec(opts BuildOpts) (string, error) {
 	return v, nil
 }
 
-func getTobariPkgs(args []string, opts BuildOpts) (map[string]string, error) {
+// effectiveTobariVersion resolves which tobari version the current build
+// links against. The target module's tobari version takes precedence over the
+// binary's version: when the tobari binary is built with one version but the
+// target application depends on a different version, using the binary's
+// version would cause fingerprint mismatches at link time because the
+// overlay-modified runtime packages would reference tobari packages at the
+// binary's version while the target links against its own version.
+//
+// Both the compile phase (which builds tobari and saves the pkgs cache) and
+// the link phase (which loads it) must resolve the version the same way, so
+// the version ID can serve as part of the cache key.
+func effectiveTobariVersion() (*version.Version, error) {
 	ver, err := version.Get()
 	if err != nil {
 		return nil, err
 	}
-	// Prefer the target module's tobari version over the binary's version.
-	// When the tobari binary is built with one version but the target application
-	// depends on a different version, using the binary's version would cause
-	// fingerprint mismatches at link time because the overlay-modified runtime
-	// packages would reference tobari packages at the binary's version while
-	// the target links against its own version.
 	if targetVer := resolveTargetTobariVersion(); targetVer != nil {
 		ver = targetVer
 	}
+	return ver, nil
+}
+
+func getTobariPkgs(args []string, opts BuildOpts, ver *version.Version) (map[string]string, error) {
 	workDir, err := workDirFromArgs(args)
 	if err != nil {
 		return nil, err

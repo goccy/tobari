@@ -86,11 +86,14 @@ func createGoMod(path string, ver *version.Version, lang string) error {
 		return fmt.Errorf("failed to add go stmt: %w", err)
 	}
 	if ver.LocalPath != "" {
-		rel, err := filepath.Rel(path, ver.LocalPath)
-		if err != nil {
-			return fmt.Errorf("failed to create relative path from %s: %w", path, err)
-		}
-		if err := f.AddReplace("github.com/goccy/tobari", "", rel, ""); err != nil {
+		// Use the absolute path in the replace directive. A relative path
+		// would have to be computed against the go.mod's directory, but Go
+		// resolves the module root through symlinks (e.g. macOS's
+		// /var -> /private/var for $WORK under $TMPDIR), so a lexically
+		// correct relative path can point at the wrong directory. The temp
+		// module is ephemeral and never leaves this machine, so an absolute
+		// path is both safe and unambiguous.
+		if err := f.AddReplace("github.com/goccy/tobari", "", ver.LocalPath, ""); err != nil {
 			return fmt.Errorf("failed to add replace directive: %w", err)
 		}
 	} else {

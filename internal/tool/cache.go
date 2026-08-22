@@ -33,17 +33,25 @@ func getRuntimeExportPath(importcfgPath string) string {
 }
 
 // saveTobariPkgsCache writes the tobari package map to cache locations keyed by
-// the runtime package's export file. This enables the link phase to find the
-// correct tobari packages without knowing which build flags were used.
+// the runtime package's export file and the tobari version. This enables the
+// link phase to find the correct tobari packages without knowing which build
+// flags were used.
 //
 // Two cache locations are written:
-//  1. $TMPDIR/tobari/cache/<runtime_cache_filename>.json
+//  1. $TMPDIR/tobari/cache/<runtime_cache_filename>_<tobari_version_id>.json
 //     Used when the link phase references cached packages from the Go build cache.
 //     The runtime export filename in Go's build cache is the SHA256 of the file
-//     content, so it uniquely identifies the build configuration.
+//     content, so it uniquely identifies the build configuration. The tobari
+//     version ID distinguishes builds that share a build configuration but
+//     resolve tobari differently: a target module may pin tobari to a local
+//     replace or a specific version while other builds on the same machine use
+//     the binary's version. Those produce tobari packages with different
+//     fingerprints, and mixing them up fails the link.
 //  2. <dir_of_runtime_work_path>/tobari_pkgs.json
-//     Used within the same build where compile and link share the same $WORK directory.
-func saveTobariPkgsCache(compileImportcfgPath string, pkgs map[string]string) error {
+//     Used within the same build where compile and link share the same $WORK
+//     directory. A single build resolves exactly one tobari version, so this
+//     file needs no version suffix.
+func saveTobariPkgsCache(compileImportcfgPath string, pkgs map[string]string, tobariVerID string) error {
 	// Get runtime's path from the compile importcfg (this is a $WORK/bNN/_pkg_.a path)
 	runtimeWorkPath := getRuntimeExportPath(compileImportcfgPath)
 	if runtimeWorkPath == "" {
@@ -61,12 +69,12 @@ func saveTobariPkgsCache(compileImportcfgPath string, pkgs map[string]string) er
 		return fmt.Errorf("failed to marshal tobari pkgs cache: %w", err)
 	}
 
-	// Write to cache/<runtime_cache_filename>.json
+	// Write to cache/<runtime_cache_filename>_<tobari_version_id>.json
 	cacheDir := filepath.Join(utils.TobariTempDir(), "cache")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create cache dir: %w", err)
 	}
-	cacheFile := filepath.Join(cacheDir, filepath.Base(runtimeCachePath)+".json")
+	cacheFile := filepath.Join(cacheDir, pkgsCacheFileName(runtimeCachePath, tobariVerID))
 	_ = os.WriteFile(cacheFile, data, 0o600)
 
 	// Write to <dir_of_runtime_work_path>/tobari_pkgs.json
@@ -77,21 +85,22 @@ func saveTobariPkgsCache(compileImportcfgPath string, pkgs map[string]string) er
 }
 
 // loadTobariPkgsCache attempts to load the cached tobari package map using the
-// runtime package's path from the link importcfg.
+// runtime package's path from the link importcfg and the tobari version the
+// current build resolves to.
 //
 // It tries two cache locations:
-//  1. $TMPDIR/tobari/cache/<filename_of_runtime>.json — hits when the link phase
-//     references cached packages from Go's build cache.
+//  1. $TMPDIR/tobari/cache/<filename_of_runtime>_<tobari_version_id>.json —
+//     hits when the link phase references cached packages from Go's build cache.
 //  2. <dir_of_runtime>/tobari_pkgs.json — hits within the same build where compile
 //     and link share the same $WORK directory.
-func loadTobariPkgsCache(linkImportcfgPath string) (map[string]string, bool) {
+func loadTobariPkgsCache(linkImportcfgPath, tobariVerID string) (map[string]string, bool) {
 	runtimePath := getRuntimeExportPath(linkImportcfgPath)
 	if runtimePath == "" {
 		return nil, false
 	}
 
-	// Try cache/<filename>.json first
-	cacheFile := filepath.Join(utils.TobariTempDir(), "cache", filepath.Base(runtimePath)+".json")
+	// Try cache/<filename>_<version_id>.json first
+	cacheFile := filepath.Join(utils.TobariTempDir(), "cache", pkgsCacheFileName(runtimePath, tobariVerID))
 	if pkgs, ok := readAndValidatePkgsCache(cacheFile); ok {
 		return pkgs, true
 	}
@@ -103,6 +112,15 @@ func loadTobariPkgsCache(linkImportcfgPath string) (map[string]string, bool) {
 	}
 
 	return nil, false
+}
+
+// pkgsCacheFileName builds the global pkgs-cache filename from the runtime
+// package's export path and the tobari version ID. Keying by both isolates
+// entries per build configuration AND per tobari resolution, so builds that
+// pin tobari differently (via the target go.mod) never read each other's
+// entries.
+func pkgsCacheFileName(runtimePath, tobariVerID string) string {
+	return filepath.Base(runtimePath) + "_" + tobariVerID + ".json"
 }
 
 func readAndValidatePkgsCache(path string) (map[string]string, bool) {
