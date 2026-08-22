@@ -247,6 +247,14 @@ func TestCacheBehavior(t *testing.T) {
 			expectedJSON: "expected_tobari.json",
 		},
 		{
+			name:         "dynamiccall",
+			flagsDir:     "testdata/dynamiccall",
+			runDir:       "testdata/dynamiccall",
+			testArgs:     []string{"-coverpkg=example.com/dynamiccall/..."},
+			hasTest:      true,
+			expectedJSON: "expected_tobari.json",
+		},
+		{
 			name:     "initorder",
 			flagsDir: "testdata/initorder",
 			runDir:   "testdata/initorder",
