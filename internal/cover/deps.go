@@ -20,7 +20,9 @@
 //     served to packages.Load via a custom GOPACKAGESDRIVER. packages.Load
 //     type-checks all packages from source with consistent type references.
 //     ssautil.AllPackages + prog.Build() constructs SSA with bodies for
-//     every package. Finally, RTA produces an accurate call graph.
+//     every package. Finally, RTA produces the call graph, and a VTA graph
+//     confirms its dynamic edges during dependency extraction (see
+//     followEdge).
 //
 // # Why GOPACKAGESDRIVER?
 //
@@ -83,7 +85,9 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/callgraph"
+	"golang.org/x/tools/go/callgraph/cha"
 	"golang.org/x/tools/go/callgraph/rta"
+	"golang.org/x/tools/go/callgraph/vta"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
@@ -320,7 +324,9 @@ func collectAnonymFuncsFromInfo(fset *token.FileSet, file *ast.File, body *ast.B
 
 // CreateMainDeps performs whole-program SSA analysis starting from the main
 // package (or test binary) and returns dependency maps for all coverage-target
-// packages. It uses RTA (Rapid Type Analysis) for call graph construction.
+// packages. It uses RTA (Rapid Type Analysis) for call graph construction
+// and reachability, refined by VTA (variable type analysis) for dynamic call
+// edges during dependency extraction (see followEdge).
 //
 // It runs `go list -deps -json .` to collect package metadata (no -export
 // or -toolexec needed), then serves the results to packages.Load via a
@@ -501,6 +507,28 @@ func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *Packa
 	rtaResult := rta.Analyze(roots, true)
 	graph := rtaResult.CallGraph
 
+	// RTA resolves dynamic calls far too broadly for scoped coverage: a
+	// function-value call (e.g. sync.Once's f()) is resolved purely by
+	// signature — every address-taken function with a matching signature
+	// becomes a callee, fanning one shared-helper call site out to hundreds
+	// of unrelated functions, including test and Example bodies — and
+	// interface dispatch is resolved to every implementation in the binary.
+	//
+	// To keep the reachability judgment sound, build a VTA call graph over
+	// the RTA-reachable functions and use it during dependency extraction to
+	// confirm dynamic edges (both function-value calls and interface
+	// dispatch): VTA propagates which values actually flow into each call
+	// site, so a callback or implementation passed from user code is kept
+	// while signature-only and every-implementation matches are dropped.
+	// Static calls, and invoke edges whose callee is a generic
+	// instantiation (a VTA blind spot), stay resolved by RTA — see
+	// followEdge for the exact policy.
+	vtaFuncs := make(map[*ssa.Function]bool, len(rtaResult.Reachable))
+	for fn := range rtaResult.Reachable {
+		vtaFuncs[fn] = true
+	}
+	vtaGraph := vta.CallGraph(vtaFuncs, cha.CallGraph(prog))
+
 	// Build dependency map for coverage-target packages.
 	//
 	// Iterate the reachable set rather than the call graph's nodes: RTA only
@@ -516,12 +544,54 @@ func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *Packa
 		fnName := normalizeFuncName(fn)
 		var deps []string
 		if n := graph.Nodes[fn]; n != nil {
-			deps = analyzeMainFuncDeps(coverPkgSet, n)
+			deps = analyzeMainFuncDeps(coverPkgSet, n, vtaGraph)
 		}
 		suppDeps[fnName] = mergeDeps(suppDeps[fnName], deps)
 	}
 
 	return suppDeps, nil
+}
+
+// followEdge reports whether a call edge from the RTA graph should be
+// followed during dependency extraction.
+//
+// Static calls are always followed. Dynamic calls — interface dispatch
+// (invoke mode) and function-value calls — need confirmation from the VTA
+// graph, which propagates the values that actually flow into each call site.
+// RTA alone resolves a function-value call to every address-taken function
+// with a matching signature (e.g. sync.Once's f() fans out to every func()
+// in the binary, including test and Example bodies), and resolves interface
+// dispatch to every implementation in the binary (e.g. err.Error() inside
+// fmt reaches every error type), so following RTA's dynamic edges directly
+// drags provably unreachable code into every caller's dependency closure.
+//
+// The exception is invoke edges whose callee is an instantiation of a
+// generic function or method: VTA does not track type flows into interface
+// values for instantiated generics (it resolves such call sites only to
+// their non-generic implementations), so requiring VTA confirmation there
+// would silently drop real dependencies. For those callees RTA's judgment
+// is kept.
+func followEdge(vtaGraph *callgraph.Graph, e *callgraph.Edge) bool {
+	if e.Site == nil {
+		return true
+	}
+	common := e.Site.Common()
+	if common.StaticCallee() != nil {
+		return true
+	}
+	if common.IsInvoke() && e.Callee.Func != nil && e.Callee.Func.Origin() != nil {
+		return true
+	}
+	caller := vtaGraph.Nodes[e.Caller.Func]
+	if caller == nil {
+		return false
+	}
+	for _, ve := range caller.Out {
+		if ve.Site == e.Site && ve.Callee.Func == e.Callee.Func {
+			return true
+		}
+	}
+	return false
 }
 
 // isExcludedFromAnalysis reports whether a package's SSA body may be skipped.
@@ -762,17 +832,21 @@ func matchCoverPkg(pkgPath string, coverPkgSet map[string]struct{}) string {
 }
 
 // analyzeMainFuncDeps finds all functions in coverage-target packages that
-// are transitively reachable from node n's callees.
-func analyzeMainFuncDeps(coverPkgSet map[string]struct{}, n *callgraph.Node) []string {
+// are transitively reachable from node n's callees. vtaGraph confirms
+// dynamic function-value edges (see followEdge).
+func analyzeMainFuncDeps(coverPkgSet map[string]struct{}, n *callgraph.Node, vtaGraph *callgraph.Graph) []string {
 	depMap := make(map[string]struct{})
 	seenMap := make(map[*callgraph.Node]struct{})
 	for _, out := range n.Out {
+		if !followEdge(vtaGraph, out) {
+			continue
+		}
 		callee := out.Callee
 		if _, exists := seenMap[callee]; exists {
 			continue
 		}
 		seenMap[callee] = struct{}{}
-		analyzeMainFuncDepsRecursive(coverPkgSet, callee, depMap, seenMap)
+		analyzeMainFuncDepsRecursive(coverPkgSet, callee, depMap, seenMap, vtaGraph)
 	}
 	deps := make([]string, 0, len(depMap))
 	for dep := range depMap {
@@ -782,7 +856,7 @@ func analyzeMainFuncDeps(coverPkgSet map[string]struct{}, n *callgraph.Node) []s
 	return deps
 }
 
-func analyzeMainFuncDepsRecursive(coverPkgSet map[string]struct{}, n *callgraph.Node, depMap map[string]struct{}, seenMap map[*callgraph.Node]struct{}) {
+func analyzeMainFuncDepsRecursive(coverPkgSet map[string]struct{}, n *callgraph.Node, depMap map[string]struct{}, seenMap map[*callgraph.Node]struct{}, vtaGraph *callgraph.Graph) {
 	fn := n.Func
 
 	if fn != nil && funcCoverPkgPath(fn, coverPkgSet) != "" {
@@ -802,12 +876,15 @@ func analyzeMainFuncDepsRecursive(coverPkgSet map[string]struct{}, n *callgraph.
 		return
 	}
 	for _, out := range n.Out {
+		if !followEdge(vtaGraph, out) {
+			continue
+		}
 		callee := out.Callee
 		if _, exists := seenMap[callee]; exists {
 			continue
 		}
 		seenMap[callee] = struct{}{}
-		analyzeMainFuncDepsRecursive(coverPkgSet, callee, depMap, seenMap)
+		analyzeMainFuncDepsRecursive(coverPkgSet, callee, depMap, seenMap, vtaGraph)
 	}
 }
 
