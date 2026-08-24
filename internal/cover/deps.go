@@ -529,6 +529,8 @@ func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *Packa
 	}
 	vtaGraph := vta.CallGraph(vtaFuncs, cha.CallGraph(prog))
 
+	followable := newFollowableEdges(graph, vtaGraph)
+
 	// Build dependency map for coverage-target packages.
 	//
 	// Iterate the reachable set rather than the call graph's nodes: RTA only
@@ -544,7 +546,7 @@ func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *Packa
 		fnName := normalizeFuncName(fn)
 		var deps []string
 		if n := graph.Nodes[fn]; n != nil {
-			deps = analyzeMainFuncDeps(coverPkgSet, n, vtaGraph)
+			deps = analyzeMainFuncDeps(coverPkgSet, n, followable)
 		}
 		suppDeps[fnName] = mergeDeps(suppDeps[fnName], deps)
 	}
@@ -571,27 +573,102 @@ func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *Packa
 // their non-generic implementations), so requiring VTA confirmation there
 // would silently drop real dependencies. For those callees RTA's judgment
 // is kept.
-func followEdge(vtaGraph *callgraph.Graph, e *callgraph.Edge) bool {
-	if e.Site == nil {
+func followEdge(vtaEdges map[vtaEdge]struct{}, e *callgraph.Edge) bool {
+	if followedWithoutVTA(e.Site, e.Callee.Func) {
 		return true
 	}
-	common := e.Site.Common()
+	_, confirmed := vtaEdges[vtaEdge{site: e.Site, callee: e.Callee.Func}]
+	return confirmed
+}
+
+// followedWithoutVTA reports whether the policy above resolves a (site,
+// callee) pair to "follow" without consulting the VTA index.
+//
+// indexVTAEdges shares this predicate rather than repeating the
+// short-circuits, so a later change to the policy cannot leave the index
+// missing a key the policy still asks about.
+func followedWithoutVTA(site ssa.CallInstruction, callee *ssa.Function) bool {
+	if site == nil {
+		return true
+	}
+	common := site.Common()
 	if common.StaticCallee() != nil {
 		return true
 	}
-	if common.IsInvoke() && e.Callee.Func != nil && e.Callee.Func.Origin() != nil {
-		return true
-	}
-	caller := vtaGraph.Nodes[e.Caller.Func]
-	if caller == nil {
-		return false
-	}
-	for _, ve := range caller.Out {
-		if ve.Site == e.Site && ve.Callee.Func == e.Callee.Func {
-			return true
+	return common.IsInvoke() && callee != nil && callee.Origin() != nil
+}
+
+// vtaEdge identifies a call the VTA graph confirms: a call site paired with
+// one callee the values flowing into that site can reach.
+type vtaEdge struct {
+	site   ssa.CallInstruction
+	callee *ssa.Function
+}
+
+// indexVTAEdges collects the VTA call site and callee pairs that followEdge
+// needs confirmation for.
+//
+// Pairs the policy resolves on its own are left out: indexing them too would
+// add an entry per static call, which no lookup ever reads, inside the
+// compiler's memory budget.
+func indexVTAEdges(vtaGraph *callgraph.Graph) map[vtaEdge]struct{} {
+	edges := make(map[vtaEdge]struct{}, len(vtaGraph.Nodes))
+	for _, n := range vtaGraph.Nodes {
+		for _, e := range n.Out {
+			if e.Site == nil || e.Callee == nil {
+				continue
+			}
+			if followedWithoutVTA(e.Site, e.Callee.Func) {
+				continue
+			}
+			edges[vtaEdge{site: e.Site, callee: e.Callee.Func}] = struct{}{}
 		}
 	}
-	return false
+	return edges
+}
+
+// followableEdges holds, per RTA node, the out-edges the dependency traversal
+// may follow.
+type followableEdges struct {
+	out map[*callgraph.Node][]*callgraph.Edge
+}
+
+// newFollowableEdges applies the edge policy to every RTA edge once.
+//
+// followEdge depends only on the edge, so a traversal that asks per visit gets
+// the same verdict it got for every other coverage-target function that
+// reached the edge.
+func newFollowableEdges(rtaGraph, vtaGraph *callgraph.Graph) *followableEdges {
+	vtaEdges := indexVTAEdges(vtaGraph)
+	out := make(map[*callgraph.Node][]*callgraph.Edge, len(rtaGraph.Nodes))
+
+	// kept is scratch space so each stored slice can be allocated at its exact
+	// length; a per-node slice of capacity len(n.Out) would keep the pruned
+	// fan-out resident.
+	var kept []*callgraph.Edge
+	for _, n := range rtaGraph.Nodes {
+		kept = kept[:0]
+		for _, e := range n.Out {
+			if followEdge(vtaEdges, e) {
+				kept = append(kept, e)
+			}
+		}
+		if len(kept) == len(n.Out) {
+			// RTA is done building by now and the traversal only reads these,
+			// so aliasing beats a defensive copy.
+			out[n] = n.Out
+			continue
+		}
+		followable := make([]*callgraph.Edge, len(kept))
+		copy(followable, kept)
+		out[n] = followable
+	}
+	return &followableEdges{out: out}
+}
+
+// from returns the out-edges of n that may be followed.
+func (f *followableEdges) from(n *callgraph.Node) []*callgraph.Edge {
+	return f.out[n]
 }
 
 // isExcludedFromAnalysis reports whether a package's SSA body may be skipped.
@@ -832,21 +909,18 @@ func matchCoverPkg(pkgPath string, coverPkgSet map[string]struct{}) string {
 }
 
 // analyzeMainFuncDeps finds all functions in coverage-target packages that
-// are transitively reachable from node n's callees. vtaGraph confirms
-// dynamic function-value edges (see followEdge).
-func analyzeMainFuncDeps(coverPkgSet map[string]struct{}, n *callgraph.Node, vtaGraph *callgraph.Graph) []string {
+// are transitively reachable from node n's callees. followable carries the
+// out-edges the traversal may take (see followEdge).
+func analyzeMainFuncDeps(coverPkgSet map[string]struct{}, n *callgraph.Node, followable *followableEdges) []string {
 	depMap := make(map[string]struct{})
 	seenMap := make(map[*callgraph.Node]struct{})
-	for _, out := range n.Out {
-		if !followEdge(vtaGraph, out) {
-			continue
-		}
+	for _, out := range followable.from(n) {
 		callee := out.Callee
 		if _, exists := seenMap[callee]; exists {
 			continue
 		}
 		seenMap[callee] = struct{}{}
-		analyzeMainFuncDepsRecursive(coverPkgSet, callee, depMap, seenMap, vtaGraph)
+		analyzeMainFuncDepsRecursive(coverPkgSet, callee, depMap, seenMap, followable)
 	}
 	deps := make([]string, 0, len(depMap))
 	for dep := range depMap {
@@ -856,7 +930,7 @@ func analyzeMainFuncDeps(coverPkgSet map[string]struct{}, n *callgraph.Node, vta
 	return deps
 }
 
-func analyzeMainFuncDepsRecursive(coverPkgSet map[string]struct{}, n *callgraph.Node, depMap map[string]struct{}, seenMap map[*callgraph.Node]struct{}, vtaGraph *callgraph.Graph) {
+func analyzeMainFuncDepsRecursive(coverPkgSet map[string]struct{}, n *callgraph.Node, depMap map[string]struct{}, seenMap map[*callgraph.Node]struct{}, followable *followableEdges) {
 	fn := n.Func
 
 	if fn != nil && funcCoverPkgPath(fn, coverPkgSet) != "" {
@@ -875,16 +949,13 @@ func analyzeMainFuncDepsRecursive(coverPkgSet map[string]struct{}, n *callgraph.
 	if isGRPCGoPackage(path) {
 		return
 	}
-	for _, out := range n.Out {
-		if !followEdge(vtaGraph, out) {
-			continue
-		}
+	for _, out := range followable.from(n) {
 		callee := out.Callee
 		if _, exists := seenMap[callee]; exists {
 			continue
 		}
 		seenMap[callee] = struct{}{}
-		analyzeMainFuncDepsRecursive(coverPkgSet, callee, depMap, seenMap, vtaGraph)
+		analyzeMainFuncDepsRecursive(coverPkgSet, callee, depMap, seenMap, followable)
 	}
 }
 
