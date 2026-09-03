@@ -1,6 +1,7 @@
 package cover
 
 import (
+	"fmt"
 	"math/bits"
 	"sort"
 
@@ -112,7 +113,15 @@ type frontiers struct {
 func (fr *frontiers) notExpanded(n *callgraph.Node, coverPkgSet map[string]struct{}) (*frontierSet, bool) {
 	fn := n.Func
 	if fn != nil && funcCoverPkgPath(fn, coverPkgSet) != "" {
-		bit := fr.ci.bitOf[normalizeFuncName(fn)]
+		name := normalizeFuncName(fn)
+		bit, ok := fr.ci.bitOf[name]
+		if !ok {
+			// newCoverBitIndex ran the same predicate over the same nodes, so
+			// a missing name is a bug in this file. Failing here beats
+			// silently recording bit 0 — a different function — as the
+			// dependency.
+			panic(fmt.Sprintf("tobari: coverage target %s has no bit in the frontier index", name))
+		}
 		set := make([]uint64, fr.ci.words)
 		set[bit/64] |= 1 << uint(bit%64)
 		return &frontierSet{bits: set}, true
@@ -124,7 +133,7 @@ func (fr *frontiers) notExpanded(n *callgraph.Node, coverPkgSet map[string]struc
 	return nil, false
 }
 
-func newFrontiers(rtaGraph *callgraph.Graph, followable *followableEdges, coverPkgSet map[string]struct{}) *frontiers {
+func newFrontiers(rtaGraph *callgraph.Graph, followable *followableCallees, coverPkgSet map[string]struct{}) *frontiers {
 	fr := &frontiers{
 		ci:     newCoverBitIndex(rtaGraph, coverPkgSet),
 		byNode: make(map[*callgraph.Node]*frontierSet, len(rtaGraph.Nodes)),
@@ -133,13 +142,13 @@ func newFrontiers(rtaGraph *callgraph.Graph, followable *followableEdges, coverP
 
 	// A node the walk stops at contributes its own frontier and is never
 	// expanded, so the grouping below must not see its out-edges either.
-	stops := make(map[*callgraph.Node]*frontierSet, len(rtaGraph.Nodes))
+	stops := make(map[*callgraph.Node]*frontierSet)
 	for _, n := range rtaGraph.Nodes {
 		if set, ok := fr.notExpanded(n, coverPkgSet); ok {
 			stops[n] = set
 		}
 	}
-	edgesOf := func(n *callgraph.Node) []*callgraph.Edge {
+	calleesOf := func(n *callgraph.Node) []*callgraph.Node {
 		if _, ok := stops[n]; ok {
 			return nil
 		}
@@ -149,20 +158,22 @@ func newFrontiers(rtaGraph *callgraph.Graph, followable *followableEdges, coverP
 	// Group the nodes that can all reach each other, iteratively so that a deep
 	// graph cannot exhaust the stack. Each group is completed only after every
 	// group it points at, so its frontier can be assembled on the spot.
+	//
+	// A node's frontier is assigned the moment its group is settled, so
+	// byNode doubles as the bookkeeping for the grouping: a visited node whose
+	// frontier is still nil is on the pending stack, and a node the current
+	// group points at whose frontier is still nil is a member of the group.
 	type frame struct {
-		node  *callgraph.Node
-		edges []*callgraph.Edge
-		next  int
+		node    *callgraph.Node
+		callees []*callgraph.Node
+		next    int
 	}
 	var (
-		order     = make(map[*callgraph.Node]int, len(rtaGraph.Nodes))
-		low       = make(map[*callgraph.Node]int, len(rtaGraph.Nodes))
-		open      = make(map[*callgraph.Node]bool, len(rtaGraph.Nodes))
-		groupOf   = make(map[*callgraph.Node]int, len(rtaGraph.Nodes))
-		pending   []*callgraph.Node
-		frames    []*frame
-		counter   int
-		nextGroup int
+		order   = make(map[*callgraph.Node]int, len(rtaGraph.Nodes))
+		low     = make(map[*callgraph.Node]int, len(rtaGraph.Nodes))
+		pending []*callgraph.Node
+		frames  []frame
+		counter int
 	)
 
 	begin := func(n *callgraph.Node) {
@@ -170,33 +181,24 @@ func newFrontiers(rtaGraph *callgraph.Graph, followable *followableEdges, coverP
 		low[n] = counter
 		counter++
 		pending = append(pending, n)
-		open[n] = true
-		frames = append(frames, &frame{node: n, edges: edgesOf(n)})
+		frames = append(frames, frame{node: n, callees: calleesOf(n)})
 	}
 
 	// settle assigns one frontier to every member of a completed group: the
 	// union of the frontiers of everything the group points at from outside
 	// itself.
 	settle := func(members []*callgraph.Node) {
-		id := nextGroup
-		nextGroup++
-		// Numbered first so that the loops below can tell an edge that leaves
-		// the group from one that stays inside it.
-		for _, m := range members {
-			groupOf[m] = id
-		}
-
 		contributions := func(yield func(*frontierSet)) {
 			for _, m := range members {
 				if set, ok := stops[m]; ok {
 					yield(set)
 					continue
 				}
-				for _, e := range followable.from(m) {
-					if groupOf[e.Callee] == id {
-						continue // stays inside; adds nothing to what we are building
-					}
-					if set := fr.byNode[e.Callee]; set != nil {
+				for _, callee := range followable.from(m) {
+					// Every group this one points at was settled before it,
+					// so a callee without a frontier yet is a member of this
+					// group and adds nothing to what is being built.
+					if set := fr.byNode[callee]; set != nil {
 						yield(set)
 					}
 				}
@@ -246,35 +248,35 @@ func newFrontiers(rtaGraph *callgraph.Graph, followable *followableEdges, coverP
 		}
 		begin(root)
 		for len(frames) > 0 {
-			f := frames[len(frames)-1]
-			if f.next < len(f.edges) {
-				w := f.edges[f.next].Callee
+			f := &frames[len(frames)-1]
+			if f.next < len(f.callees) {
+				w := f.callees[f.next]
 				f.next++
 				if _, seen := order[w]; !seen {
-					begin(w)
-				} else if open[w] && order[w] < low[f.node] {
+					begin(w) // may reallocate frames; f is not used past here
+				} else if fr.byNode[w] == nil && order[w] < low[f.node] {
 					low[f.node] = order[w]
 				}
 				continue
 			}
+			node := f.node
 			frames = frames[:len(frames)-1]
-			if low[f.node] == order[f.node] {
+			if low[node] == order[node] {
 				var members []*callgraph.Node
 				for {
 					m := pending[len(pending)-1]
 					pending = pending[:len(pending)-1]
-					open[m] = false
 					members = append(members, m)
-					if m == f.node {
+					if m == node {
 						break
 					}
 				}
 				settle(members)
 			}
 			if len(frames) > 0 {
-				parent := frames[len(frames)-1]
-				if low[f.node] < low[parent.node] {
-					low[parent.node] = low[f.node]
+				parent := frames[len(frames)-1].node
+				if low[node] < low[parent] {
+					low[parent] = low[node]
 				}
 			}
 		}
@@ -285,13 +287,13 @@ func newFrontiers(rtaGraph *callgraph.Graph, followable *followableEdges, coverP
 
 // depsFrom returns the frontier of n's followable callees, sorted — the
 // per-function value stored in the suppDeps map.
-func (fr *frontiers) depsFrom(n *callgraph.Node, followable *followableEdges) []string {
+func (fr *frontiers) depsFrom(n *callgraph.Node, followable *followableCallees) []string {
 	var (
 		only     *frontierSet
 		distinct int
 	)
-	for _, e := range followable.from(n) {
-		set := fr.byNode[e.Callee]
+	for _, callee := range followable.from(n) {
+		set := fr.byNode[callee]
 		if set == nil || set == fr.empty {
 			continue
 		}
@@ -309,8 +311,8 @@ func (fr *frontiers) depsFrom(n *callgraph.Node, followable *followableEdges) []
 		return fr.ci.decode(only.bits)
 	default:
 		union := make([]uint64, fr.ci.words)
-		for _, e := range followable.from(n) {
-			if set := fr.byNode[e.Callee]; set != nil {
+		for _, callee := range followable.from(n) {
+			if set := fr.byNode[callee]; set != nil {
 				for i := range set.bits {
 					union[i] |= set.bits[i]
 				}

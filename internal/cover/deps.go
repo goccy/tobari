@@ -529,7 +529,7 @@ func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *Packa
 	}
 	vtaGraph := vta.CallGraph(vtaFuncs, cha.CallGraph(prog))
 
-	followable := newFollowableEdges(graph, vtaGraph)
+	followable := newFollowableCallees(graph, vtaGraph)
 	frontierSets := newFrontiers(graph, followable, coverPkgSet)
 
 	// Build dependency map for coverage-target packages.
@@ -574,20 +574,23 @@ func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *Packa
 // their non-generic implementations), so requiring VTA confirmation there
 // would silently drop real dependencies. For those callees RTA's judgment
 // is kept.
-func followEdge(vtaEdges map[vtaEdge]struct{}, e *callgraph.Edge) bool {
+//
+// confirmed holds the (site, callee) pairs the VTA graph records for the
+// edge's caller; see vtaConfirmedEdges.
+func followEdge(confirmed map[vtaEdge]struct{}, e *callgraph.Edge) bool {
 	if followedWithoutVTA(e.Site, e.Callee.Func) {
 		return true
 	}
-	_, confirmed := vtaEdges[vtaEdge{site: e.Site, callee: e.Callee.Func}]
-	return confirmed
+	_, ok := confirmed[vtaEdge{site: e.Site, callee: e.Callee.Func}]
+	return ok
 }
 
 // followedWithoutVTA reports whether the policy above resolves a (site,
-// callee) pair to "follow" without consulting the VTA index.
+// callee) pair to "follow" without consulting the VTA graph.
 //
-// indexVTAEdges shares this predicate rather than repeating the
-// short-circuits, so a later change to the policy cannot leave the index
-// missing a key the policy still asks about.
+// vtaConfirmedEdges shares this predicate rather than repeating the
+// short-circuits, so a later change to the policy cannot leave the confirmed
+// set missing a pair the policy still asks about.
 func followedWithoutVTA(site ssa.CallInstruction, callee *ssa.Function) bool {
 	if site == nil {
 		return true
@@ -606,69 +609,100 @@ type vtaEdge struct {
 	callee *ssa.Function
 }
 
-// indexVTAEdges collects the VTA call site and callee pairs that followEdge
-// needs confirmation for.
+// vtaConfirmedEdges returns the (site, callee) pairs the VTA graph records
+// for the function of RTA node n, the pairs followEdge may ask about for n's
+// out-edges.
 //
-// Pairs the policy resolves on its own are left out: indexing them too would
-// add an entry per static call, which no lookup ever reads, inside the
-// compiler's memory budget.
-func indexVTAEdges(vtaGraph *callgraph.Graph) map[vtaEdge]struct{} {
-	edges := make(map[vtaEdge]struct{}, len(vtaGraph.Nodes))
-	for _, n := range vtaGraph.Nodes {
-		for _, e := range n.Out {
-			if e.Site == nil || e.Callee == nil {
-				continue
-			}
-			if followedWithoutVTA(e.Site, e.Callee.Func) {
-				continue
-			}
-			edges[vtaEdge{site: e.Site, callee: e.Callee.Func}] = struct{}{}
+// One set per caller is enough: both graphs key their nodes by the same
+// *ssa.Function and record a call under the function containing the site
+// (rta and vta both add edges as site.Parent()), so the VTA node of n.Func
+// holds every pair that could confirm an edge of n. Building the set per
+// caller keeps the scratch space bounded by one function's VTA out-degree
+// rather than by the whole VTA graph.
+//
+// Pairs the policy resolves on its own are left out, and the result is nil
+// when no edge of n needs confirmation, so a function that only makes static
+// calls — most of them — costs nothing here.
+func vtaConfirmedEdges(vtaGraph *callgraph.Graph, n *callgraph.Node) map[vtaEdge]struct{} {
+	needed := false
+	for _, e := range n.Out {
+		if !followedWithoutVTA(e.Site, e.Callee.Func) {
+			needed = true
+			break
 		}
 	}
-	return edges
+	if !needed {
+		return nil
+	}
+	caller := vtaGraph.Nodes[n.Func]
+	if caller == nil {
+		return nil
+	}
+	confirmed := make(map[vtaEdge]struct{}, len(caller.Out))
+	for _, e := range caller.Out {
+		if e.Site == nil || e.Callee == nil {
+			continue
+		}
+		if followedWithoutVTA(e.Site, e.Callee.Func) {
+			continue
+		}
+		confirmed[vtaEdge{site: e.Site, callee: e.Callee.Func}] = struct{}{}
+	}
+	return confirmed
 }
 
-// followableEdges holds, per RTA node, the out-edges the dependency traversal
-// may follow.
-type followableEdges struct {
-	out map[*callgraph.Node][]*callgraph.Edge
+// followableCallees holds, per RTA node, the distinct callees the dependency
+// traversal may step to.
+type followableCallees struct {
+	out map[*callgraph.Node][]*callgraph.Node
 }
 
-// newFollowableEdges applies the edge policy to every RTA edge once.
+// newFollowableCallees applies the edge policy to every RTA edge once and
+// records each surviving callee of a node a single time.
 //
 // followEdge depends only on the edge, so a traversal that asks per visit gets
 // the same verdict it got for every other coverage-target function that
-// reached the edge.
-func newFollowableEdges(rtaGraph, vtaGraph *callgraph.Graph) *followableEdges {
-	vtaEdges := indexVTAEdges(vtaGraph)
-	out := make(map[*callgraph.Node][]*callgraph.Edge, len(rtaGraph.Nodes))
+// reached the edge. The traversal then only needs to know which nodes it can
+// step to, and RTA records one edge per call site, so a function calling the
+// same callee from several sites is stored once instead of once per site.
+func newFollowableCallees(rtaGraph, vtaGraph *callgraph.Graph) *followableCallees {
+	out := make(map[*callgraph.Node][]*callgraph.Node, len(rtaGraph.Nodes))
 
 	// kept is scratch space so each stored slice can be allocated at its exact
-	// length; a per-node slice of capacity len(n.Out) would keep the pruned
-	// fan-out resident.
-	var kept []*callgraph.Edge
+	// length. keptIn dedupes callees within one node: a callee stamped with the
+	// current generation has already been kept for this node, which avoids
+	// clearing a map between nodes.
+	var (
+		kept       []*callgraph.Node
+		keptIn     = make(map[*callgraph.Node]int, len(rtaGraph.Nodes))
+		generation int
+	)
 	for _, n := range rtaGraph.Nodes {
 		kept = kept[:0]
+		generation++
+		confirmed := vtaConfirmedEdges(vtaGraph, n)
 		for _, e := range n.Out {
-			if followEdge(vtaEdges, e) {
-				kept = append(kept, e)
+			if !followEdge(confirmed, e) {
+				continue
 			}
+			if keptIn[e.Callee] == generation {
+				continue
+			}
+			keptIn[e.Callee] = generation
+			kept = append(kept, e.Callee)
 		}
-		if len(kept) == len(n.Out) {
-			// RTA is done building by now and the traversal only reads these,
-			// so aliasing beats a defensive copy.
-			out[n] = n.Out
+		if len(kept) == 0 {
 			continue
 		}
-		followable := make([]*callgraph.Edge, len(kept))
-		copy(followable, kept)
-		out[n] = followable
+		callees := make([]*callgraph.Node, len(kept))
+		copy(callees, kept)
+		out[n] = callees
 	}
-	return &followableEdges{out: out}
+	return &followableCallees{out: out}
 }
 
-// from returns the out-edges of n that may be followed.
-func (f *followableEdges) from(n *callgraph.Node) []*callgraph.Edge {
+// from returns the distinct callees of n the traversal may step to.
+func (f *followableCallees) from(n *callgraph.Node) []*callgraph.Node {
 	return f.out[n]
 }
 
