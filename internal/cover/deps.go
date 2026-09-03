@@ -530,6 +530,7 @@ func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *Packa
 	vtaGraph := vta.CallGraph(vtaFuncs, cha.CallGraph(prog))
 
 	followable := newFollowableEdges(graph, vtaGraph)
+	frontierSets := newFrontiers(graph, followable, coverPkgSet)
 
 	// Build dependency map for coverage-target packages.
 	//
@@ -546,7 +547,7 @@ func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *Packa
 		fnName := normalizeFuncName(fn)
 		var deps []string
 		if n := graph.Nodes[fn]; n != nil {
-			deps = analyzeMainFuncDeps(coverPkgSet, n, followable)
+			deps = frontierSets.depsFrom(n, followable)
 		}
 		suppDeps[fnName] = mergeDeps(suppDeps[fnName], deps)
 	}
@@ -906,57 +907,6 @@ func matchCoverPkg(pkgPath string, coverPkgSet map[string]struct{}) string {
 		}
 	}
 	return ""
-}
-
-// analyzeMainFuncDeps finds all functions in coverage-target packages that
-// are transitively reachable from node n's callees. followable carries the
-// out-edges the traversal may take (see followEdge).
-func analyzeMainFuncDeps(coverPkgSet map[string]struct{}, n *callgraph.Node, followable *followableEdges) []string {
-	depMap := make(map[string]struct{})
-	seenMap := make(map[*callgraph.Node]struct{})
-	for _, out := range followable.from(n) {
-		callee := out.Callee
-		if _, exists := seenMap[callee]; exists {
-			continue
-		}
-		seenMap[callee] = struct{}{}
-		analyzeMainFuncDepsRecursive(coverPkgSet, callee, depMap, seenMap, followable)
-	}
-	deps := make([]string, 0, len(depMap))
-	for dep := range depMap {
-		deps = append(deps, dep)
-	}
-	sort.Strings(deps)
-	return deps
-}
-
-func analyzeMainFuncDepsRecursive(coverPkgSet map[string]struct{}, n *callgraph.Node, depMap map[string]struct{}, seenMap map[*callgraph.Node]struct{}, followable *followableEdges) {
-	fn := n.Func
-
-	if fn != nil && funcCoverPkgPath(fn, coverPkgSet) != "" {
-		depMap[normalizeFuncName(fn)] = struct{}{}
-		return
-	}
-
-	path := resolvePkgPath(fn)
-
-	if isRuntimePackage(path) {
-		return
-	}
-	if isHTTPPackage(path) {
-		return
-	}
-	if isGRPCGoPackage(path) {
-		return
-	}
-	for _, out := range followable.from(n) {
-		callee := out.Callee
-		if _, exists := seenMap[callee]; exists {
-			continue
-		}
-		seenMap[callee] = struct{}{}
-		analyzeMainFuncDepsRecursive(coverPkgSet, callee, depMap, seenMap, followable)
-	}
 }
 
 // mergeDeps merges two dependency slices, deduplicating entries.
