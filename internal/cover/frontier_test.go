@@ -2,6 +2,7 @@ package cover
 
 import (
 	"fmt"
+	"go/token"
 	"go/types"
 	"math/rand"
 	"reflect"
@@ -307,6 +308,126 @@ func TestFrontiersMatchReferenceWalk(t *testing.T) {
 	}
 }
 
+// followEdgeLinear is the edge policy stated independently of the lookup
+// structure the code under test builds: it scans the VTA out-edges of the
+// edge's own caller. Used as the oracle for per-caller confirmation.
+func followEdgeLinear(vtaGraph *callgraph.Graph, e *callgraph.Edge) bool {
+	if followedWithoutVTA(e.Site, e.Callee.Func) {
+		return true
+	}
+	caller := vtaGraph.Nodes[e.Caller.Func]
+	if caller == nil {
+		return false
+	}
+	for _, ve := range caller.Out {
+		if ve.Site == e.Site && ve.Callee.Func == e.Callee.Func {
+			return true
+		}
+	}
+	return false
+}
+
+// TestFollowableCalleesMatchesEdgePolicy builds random graphs whose call sites
+// are owned by their caller, the way rta and vta both record them, and checks
+// the per-caller confirmation against a linear scan of the caller's VTA
+// out-edges. The frontier results are checked against the reference walk on
+// the same graphs, so the dynamic-call path is covered end to end.
+func TestFollowableCalleesMatchesEdgePolicy(t *testing.T) {
+	for seed := int64(0); seed < 300; seed++ {
+		r := rand.New(rand.NewSource(seed))
+		numNodes := 1 + r.Intn(25)
+
+		fns := make([]*ssa.Function, numNodes)
+		coverPkgSet := make(map[string]struct{})
+		for i := range fns {
+			var pkgPath string
+			switch r.Intn(8) {
+			case 0, 1:
+				pkgPath = fmt.Sprintf("%s/c%d", testCoverPkgPrefix, i)
+				coverPkgSet[pkgPath] = struct{}{}
+			case 2:
+				pkgPath = fmt.Sprintf("runtime/r%d", i)
+			case 3:
+				pkgPath = "net/http"
+			case 4:
+				pkgPath = fmt.Sprintf("google.golang.org/grpc/g%d", i)
+			default:
+				pkgPath = fmt.Sprintf("%s/d%d", testOtherPkgPrefix, i)
+			}
+			fns[i] = newTestFunc(pkgPath)
+		}
+
+		rtaGraph := callgraph.New(fns[0])
+		nodes := make([]*callgraph.Node, numNodes)
+		for i, fn := range fns {
+			nodes[i] = rtaGraph.CreateNode(fn)
+		}
+
+		// Sites are pooled per caller and shared between that caller's edges,
+		// the way RTA fans one dynamic call site out to many callees.
+		type callPair struct {
+			site   ssa.CallInstruction
+			callee *ssa.Function
+		}
+		pairs := make(map[int][]callPair, numNodes)
+		for i := range nodes {
+			pool := make([]ssa.CallInstruction, 0, 3)
+			for p, n := 0, 1+r.Intn(3); p < n; p++ {
+				pool = append(pool, randomSite(r, fns[r.Intn(numNodes)]))
+			}
+			for e, n := 0, r.Intn(7); e < n; e++ {
+				site := pool[r.Intn(len(pool))]
+				callee := fns[r.Intn(numNodes)]
+				callgraph.AddEdge(nodes[i], site, rtaGraph.Nodes[callee])
+				pairs[i] = append(pairs[i], callPair{site: site, callee: callee})
+			}
+		}
+
+		// A VTA graph recorded the way vta does: every edge of a caller carries
+		// a site belonging to that same caller. Some callers are absent, some
+		// pairs are unconfirmed, and some confirmations are for pairs RTA never
+		// proposes.
+		vtaGraph := emptyVTAGraph()
+		for i := range nodes {
+			if r.Intn(5) == 0 {
+				continue
+			}
+			vtaCaller := vtaGraph.CreateNode(fns[i])
+			for _, p := range pairs[i] {
+				if r.Intn(2) == 0 {
+					continue
+				}
+				callgraph.AddEdge(vtaCaller, p.site, vtaGraph.CreateNode(p.callee))
+			}
+			if len(pairs[i]) > 0 && r.Intn(3) == 0 {
+				callgraph.AddEdge(vtaCaller, pairs[i][0].site, vtaGraph.CreateNode(fns[r.Intn(numNodes)]))
+			}
+		}
+
+		followable := newFollowableCallees(rtaGraph, vtaGraph)
+		fr := newFrontiers(rtaGraph, followable, coverPkgSet)
+
+		for i, n := range nodes {
+			var want []*callgraph.Node
+			kept := make(map[*callgraph.Node]bool, len(n.Out))
+			for _, e := range n.Out {
+				if !followEdgeLinear(vtaGraph, e) || kept[e.Callee] {
+					continue
+				}
+				kept[e.Callee] = true
+				want = append(want, e.Callee)
+			}
+			if got := followable.from(n); !reflect.DeepEqual(got, want) {
+				t.Fatalf("seed %d, node %d: followable callees = %v, want %v", seed, i, got, want)
+			}
+			wantDeps := referenceDeps(coverPkgSet, n, followable)
+			if got := fr.depsFrom(n, followable); !reflect.DeepEqual(got, wantDeps) {
+				t.Fatalf("seed %d, node %d: deps = %v, want %v", seed, i, got, wantDeps)
+			}
+		}
+	}
+}
+
 func TestFollowableCalleesDedupesParallelEdges(t *testing.T) {
 	tg := newTestGraph(map[string][]string{
 		"coverRoot": {"a", "a", "b", "a"},
@@ -335,6 +456,28 @@ func dynamicSite() ssa.CallInstruction {
 // staticSite is a call site that names its callee directly.
 func staticSite(callee *ssa.Function) ssa.CallInstruction {
 	return &ssa.Call{Call: ssa.CallCommon{Value: callee}}
+}
+
+// invokeSite is an interface method call. Its callee here is never an
+// instantiated generic, so the policy asks the VTA graph about it.
+func invokeSite() ssa.CallInstruction {
+	sig := types.NewSignatureType(nil, nil, nil, nil, nil, false)
+	method := types.NewFunc(token.NoPos, types.NewPackage("example.com/iface", "iface"), "M", sig)
+	return &ssa.Call{Call: ssa.CallCommon{Value: &ssa.Parameter{}, Method: method}}
+}
+
+// randomSite picks one of the call-site shapes the policy distinguishes.
+func randomSite(r *rand.Rand, staticCallee *ssa.Function) ssa.CallInstruction {
+	switch r.Intn(4) {
+	case 0:
+		return nil // a reflect edge, which RTA records without a site
+	case 1:
+		return staticSite(staticCallee)
+	case 2:
+		return dynamicSite()
+	default:
+		return invokeSite()
+	}
 }
 
 func TestFollowableCalleesConfirmsDynamicEdgesPerCaller(t *testing.T) {
