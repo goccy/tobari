@@ -73,6 +73,8 @@ Considering this, the formula becomes:
 Coverage (%) = (Places passed / All places in functions that could potentially be called from passed functions) * 100
 ```
 
+For shared worker goroutines, see [Known Limitations](#known-limitations).
+
 ## How to Use
 
 Using tobari is very simple with 3 steps:
@@ -605,6 +607,16 @@ To implement this functionality, Tobari passes two options during `go build`: `-
 - `-toolexec`: Hooks execution of Go build tools to dynamically add APIs to the runtime package for obtaining GID and PGID (which are not public APIs), and to embed measurement points that include GID and PGID
 
 These options are output by the `tobari flags` command, so they can be added to `go build` options by simply specifying `GOFLAGS=$(tobari flags)`.
+
+## Known Limitations
+
+### Shared Worker Goroutines
+
+When multiple requests reuse a worker goroutine linked to their coverage scopes through instrumented channel operations, named coverage reports can include work performed for other requests, including requests outside those scopes. Tobari records channel participants and accumulates counters per goroutine; it does not separate the worker's execution by individual job.
+
+For example, request A asks a shared worker to execute X, then request B asks the same worker to execute Y. A report for A collected before B runs can show only X as executed, while a report for B collected after its job completes can show both X and Y as executed. Reading A's report again after B runs can also show Y as executed.
+
+This affects positive execution counts, including entries in `counts[].coverprofile`; it is separate from the `count=0` candidate blocks added by dependency analysis. Running requests sequentially alone does not prevent this mixing, because the worker's counters persist across jobs. When workers are shared, a named report does not guarantee that every block marked as executed was executed by that request.
 
 # CLI Reference
 
