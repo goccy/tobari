@@ -7,7 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/goccy/tobari"
@@ -28,25 +30,30 @@ func (c *CLI) runMergeCmd(ctx context.Context, args []string) error {
 }
 
 func (c *CLI) runMergeJSONCmd(_ context.Context, args []string) error {
-	fs := flag.NewFlagSet("merge json", flag.ContinueOnError)
-	fs.SetOutput(c.stderr)
-	output := fs.String("o", "merged.json", "output merged tobari.json file path")
+	flagSet := flag.NewFlagSet("merge json", flag.ContinueOnError)
+	flagSet.SetOutput(c.stderr)
+	output := flagSet.String("o", "merged.json", "output merged tobari.json file path")
 
-	if err := fs.Parse(args); err != nil {
+	if err := flagSet.Parse(args); err != nil {
 		return err
 	}
 
-	if fs.NArg() < 2 {
-		return fmt.Errorf("at least two input files required\nUsage: tobari merge json [-o merged.json] <file1.json> <file2.json> [...]")
+	if flagSet.NArg() == 0 {
+		return fmt.Errorf("missing input\nUsage: tobari merge json [-o merged.json] <file.json|./...> [...]")
 	}
-	for _, arg := range fs.Args() {
+	for _, arg := range flagSet.Args() {
 		if strings.HasPrefix(arg, "-") {
-			return fmt.Errorf("flags must be specified before input files\nUsage: tobari merge json [-o merged.json] <file1.json> <file2.json> [...]")
+			return fmt.Errorf("flags must be specified before input files\nUsage: tobari merge json [-o merged.json] <file.json|./...> [...]")
 		}
 	}
 
-	reports := make([]*tobari.CoverReport, 0, fs.NArg())
-	for _, inputFile := range fs.Args() {
+	inputFiles, err := expandMergeInputs(flagSet.Args())
+	if err != nil {
+		return err
+	}
+
+	reports := make([]*tobari.CoverReport, 0, len(inputFiles))
+	for _, inputFile := range inputFiles {
 		data, err := os.ReadFile(inputFile)
 		if err != nil {
 			return fmt.Errorf("failed to read input file %s: %w", inputFile, err)
@@ -79,18 +86,18 @@ func (c *CLI) runMergeJSONCmd(_ context.Context, args []string) error {
 }
 
 func (c *CLI) runMergeSourceCmd(_ context.Context, args []string) (e error) {
-	fs := flag.NewFlagSet("merge source", flag.ContinueOnError)
-	fs.SetOutput(c.stderr)
-	output := fs.String("o", "merged.tar.gz", "output merged source archive path")
+	flagSet := flag.NewFlagSet("merge source", flag.ContinueOnError)
+	flagSet.SetOutput(c.stderr)
+	output := flagSet.String("o", "merged.tar.gz", "output merged source archive path")
 
-	if err := fs.Parse(args); err != nil {
+	if err := flagSet.Parse(args); err != nil {
 		return err
 	}
 
-	if fs.NArg() < 2 {
+	if flagSet.NArg() < 2 {
 		return fmt.Errorf("at least two input files required\nUsage: tobari merge source [-o merged.tar.gz] <a.tar.gz> <b.tar.gz> [...]")
 	}
-	for _, arg := range fs.Args() {
+	for _, arg := range flagSet.Args() {
 		if strings.HasPrefix(arg, "-") {
 			return fmt.Errorf("flags must be specified before input files\nUsage: tobari merge source [-o merged.tar.gz] <a.tar.gz> <b.tar.gz> [...]")
 		}
@@ -103,8 +110,8 @@ func (c *CLI) runMergeSourceCmd(_ context.Context, args []string) (e error) {
 		}
 	}()
 
-	inputs := make([]io.Reader, 0, fs.NArg())
-	for _, inputFile := range fs.Args() {
+	inputs := make([]io.Reader, 0, flagSet.NArg())
+	for _, inputFile := range flagSet.Args() {
 		f, err := os.Open(inputFile)
 		if err != nil {
 			return fmt.Errorf("failed to open input file %s: %w", inputFile, err)
@@ -123,8 +130,131 @@ func (c *CLI) runMergeSourceCmd(_ context.Context, args []string) (e error) {
 		return fmt.Errorf("failed to merge source archives: %w", err)
 	}
 
-	if _, err := fmt.Fprintf(c.stdout, "Merged %d source archives into %s\n", fs.NArg(), *output); err != nil {
+	if _, err := fmt.Fprintf(c.stdout, "Merged %d source archives into %s\n", flagSet.NArg(), *output); err != nil {
 		return err
 	}
 	return nil
+}
+
+// classifyMergeArg classifies a single CLI argument for `tobari merge json`.
+// kind is "file" or "pattern". For "pattern" kind, base is the walk root.
+func classifyMergeArg(arg string) (kind string, base string, err error) {
+	if strings.HasPrefix(arg, "-") {
+		return "", "", fmt.Errorf("unexpected flag-like argument: %s", arg)
+	}
+	if arg == "..." {
+		return "", "", fmt.Errorf("bare '...' is not allowed; use './...' to walk from current directory")
+	}
+	slashed := filepath.ToSlash(arg)
+	if strings.HasSuffix(slashed, "/...") {
+		trimmed := strings.TrimSuffix(slashed, "/...")
+		if trimmed == "" {
+			return "", "", fmt.Errorf("pattern base must not be filesystem root: %s", arg)
+		}
+		return "pattern", filepath.Clean(filepath.FromSlash(trimmed)), nil
+	}
+	return "file", "", nil
+}
+
+// isTobariJSONPath reports whether p ends with the canonical
+// "tobari/tobari.json" path tobari writes per package.
+func isTobariJSONPath(p string) bool {
+	sp := filepath.ToSlash(p)
+	return sp == "tobari/tobari.json" || strings.HasSuffix(sp, "/tobari/tobari.json")
+}
+
+// shouldSkipMergeWalkDir reports whether a directory found during pattern
+// expansion should be skipped. The walk root itself is never skipped (the
+// caller passes path != root).
+func shouldSkipMergeWalkDir(name string) bool {
+	if name == "vendor" {
+		return true
+	}
+	if len(name) > 0 && (name[0] == '.' || name[0] == '_') {
+		return true
+	}
+	return false
+}
+
+// walkTobariJSON walks root recursively and returns paths to all
+// "tobari/tobari.json" files found, skipping vendor/ and dot/underscore-prefixed
+// directories. Symbolic links are not followed.
+func walkTobariJSON(root string) ([]string, error) {
+	var found []string
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if path == root {
+				return err
+			}
+			// Ignore permission errors etc. on subentries.
+			return nil
+		}
+		if d.IsDir() {
+			if path != root && shouldSkipMergeWalkDir(d.Name()) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if isTobariJSONPath(path) {
+			found = append(found, path)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	return found, nil
+}
+
+// expandMergeInputs converts a raw argument list (mix of literal file paths
+// and "./..."-style patterns) into a deduplicated list of input file paths,
+// preserving discovery order.
+func expandMergeInputs(args []string) ([]string, error) {
+	seen := make(map[string]struct{})
+	var out []string
+	hasPattern := false
+	var patterns []string
+
+	add := func(p string) error {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return fmt.Errorf("failed to resolve absolute path for %s: %w", p, err)
+		}
+		if _, dup := seen[abs]; dup {
+			return nil
+		}
+		seen[abs] = struct{}{}
+		out = append(out, p)
+		return nil
+	}
+
+	for _, a := range args {
+		kind, base, err := classifyMergeArg(a)
+		if err != nil {
+			return nil, err
+		}
+		switch kind {
+		case "file":
+			if err := add(a); err != nil {
+				return nil, err
+			}
+		case "pattern":
+			hasPattern = true
+			patterns = append(patterns, a)
+			files, err := walkTobariJSON(base)
+			if err != nil {
+				return nil, fmt.Errorf("failed to walk %s: %w", a, err)
+			}
+			for _, f := range files {
+				if err := add(f); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+
+	if hasPattern && len(out) == 0 {
+		return nil, fmt.Errorf("no tobari/tobari.json files found under patterns: %v", patterns)
+	}
+	return out, nil
 }

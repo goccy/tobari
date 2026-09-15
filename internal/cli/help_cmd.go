@@ -43,11 +43,18 @@ Convert Command Options:
     -o <file>           Output coverprofile file path (default: cover.out)
 
 Merge Command:
-    tobari merge json [-o merged.json] <file1.json> <file2.json> [...]
+    tobari merge json [-o merged.json] <file.json|./...> [...]
     tobari merge source [-o merged.tar.gz] <a.tar.gz> <b.tar.gz> [...]
 
-    merge json      Merge multiple tobari.json files into one
-    merge source    Merge multiple source tar.gz archives into one
+    merge json      Merge multiple tobari.json files into one.
+                    Inputs may be literal file paths and/or Go-style "./..."
+                    package patterns. Pattern arguments walk the filesystem
+                    recursively and pick up every "tobari/tobari.json" file
+                    they find, skipping vendor/ and dot/underscore-prefixed
+                    directories. Symbolic links are not followed.
+                    Note: avoid pointing -o to a path ending in
+                    tobari/tobari.json, since the next run would pick it up.
+    merge source    Merge multiple source tar.gz archives into one.
                     Duplicate archives (same SHA-256 hash) are skipped.
                     Conflicting files (same path, different content) cause an error.
 
@@ -90,6 +97,9 @@ Examples:
 
     # Merge multiple tobari.json files
     tobari merge json -o merged.json a.json b.json
+
+    # Merge every tobari/tobari.json under the current directory recursively
+    tobari merge json -o merged.json ./...
 
     # Merge multiple source archives
     tobari merge source -o merged.tar.gz a.tar.gz b.tar.gz
