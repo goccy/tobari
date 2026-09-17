@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/goccy/tobari/internal/flags"
 	"github.com/goccy/tobari/internal/tool"
 	"github.com/goccy/tobari/internal/utils"
 )
@@ -37,10 +38,12 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 
 	// Parse tobari-specific flags before the tool path.
 	// When invoked as: tobari [--embed-code] [--build-tags=VALUE]
-	//                         [--exclude-analysis=PREFIX,...] /path/to/compile <args>
+	//                         [--exclude-analysis=PREFIX,...] [--passed-blocks-only]
+	//                         /path/to/compile <args>
 	embedCode := false
 	buildTags := ""
 	var excludeAnalysis []string
+	passedBlocksOnly := false
 	i := 1
 	for i < len(args) {
 		if args[i] == "--embed-code" {
@@ -52,11 +55,17 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 		} else if strings.HasPrefix(args[i], "--exclude-analysis=") {
 			excludeAnalysis = utils.ParsePkgPrefixes(strings.TrimPrefix(args[i], "--exclude-analysis="))
 			i++
+		} else if args[i] == "--passed-blocks-only" {
+			passedBlocksOnly = true
+			i++
 		} else {
 			break
 		}
 	}
 	args = append(args[:1], args[i:]...) // remove consumed flags
+	if passedBlocksOnly && len(excludeAnalysis) != 0 {
+		return flags.ErrExcludeAnalysisWithPassedBlocksOnly
+	}
 
 	if len(args) < 2 {
 		return c.showHelp()
@@ -74,9 +83,10 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 	// toolexec passes Go tool's absolute path as args[1]
 	if isToolexecCall(arg1) {
 		return tool.Handle(ctx, args, tool.BuildOpts{
-			EmbedCode:       embedCode,
-			BuildTags:       buildTags,
-			ExcludeAnalysis: excludeAnalysis,
+			EmbedCode:        embedCode,
+			BuildTags:        buildTags,
+			ExcludeAnalysis:  excludeAnalysis,
+			PassedBlocksOnly: passedBlocksOnly,
 		})
 	}
 

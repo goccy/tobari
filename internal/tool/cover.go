@@ -8,9 +8,13 @@ import (
 	"github.com/goccy/tobari/internal/cover"
 )
 
-func handleCover(ctx context.Context, toolPath string, args []string, embedCode bool, excludeAnalysis []string) error {
+func handleCover(ctx context.Context, toolPath string, args []string, opts BuildOpts) error {
 	if !isCoverVOption(args) && !containsSelfPackageFile(args) {
-		return cover.Run(ctx, args, embedCode, excludeAnalysis)
+		return cover.Run(ctx, args, cover.Options{
+			EmbedCode:        opts.EmbedCode,
+			ExcludeAnalysis:  opts.ExcludeAnalysis,
+			PassedBlocksOnly: opts.PassedBlocksOnly,
+		})
 	}
 	runCommand(toolPath, args)
 	return nil

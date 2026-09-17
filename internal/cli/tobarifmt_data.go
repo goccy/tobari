@@ -17,13 +17,17 @@ type tobarifmtData struct {
 	InstrLinesAll    map[int][]int           `json:"instrLinesAll"`    // fileIndex → all instrumented line numbers (from metadata.all)
 	InstrLinesScoped map[int][]int           `json:"instrLinesScoped"` // fileIndex → instrumented line numbers within CoverWithName scope
 	AllCoverage      map[int][]int           `json:"allCoverage"`      // fileIndex → covered line numbers from allcounts
+	// PassedBlocksOnly mirrors metadata.passedBlocksOnly of the report: tests
+	// carry only the lines they passed, so Instr and InstrLinesScoped are
+	// absent and the page derives denominators from InstrLinesAll.
+	PassedBlocksOnly bool `json:"passedBlocksOnly,omitempty"`
 }
 
 // tobarifmtTest represents a test with line-level coverage (compact representation).
 type tobarifmtTest struct {
 	Name     string        `json:"n"`
 	Coverage map[int][]int `json:"c"` // fileIndex → sorted list of covered line numbers
-	Instr    map[int][]int `json:"i"` // fileIndex → sorted list of instrumented line numbers
+	Instr    map[int][]int `json:"i"` // fileIndex → sorted list of instrumented line numbers (nil for a passedBlocksOnly report)
 }
 
 // tobarifmtFile represents a source file with its content.
@@ -362,7 +366,10 @@ func buildTobarifmtData(report *tobari.CoverReport, entriesMap map[string][]toba
 	for _, name := range testNames {
 		entries := entriesMap[name]
 		cov := convertToLineCoverage(entries, fileIndexMap)
-		instr := convertToLineInstrumented(entries, fileIndexMap)
+		var instr map[int][]int
+		if !report.Metadata.PassedBlocksOnly {
+			instr = convertToLineInstrumented(entries, fileIndexMap)
+		}
 		// Only include non-empty coverage
 		if len(cov) > 0 {
 			tests = append(tests, &tobarifmtTest{
@@ -397,16 +404,20 @@ func buildTobarifmtData(report *tobari.CoverReport, entriesMap map[string][]toba
 		instrLinesAll[fi] = sorted
 	}
 
-	// Compute instrumented lines within CoverWithName scope
-	scopedInstrLines := collectScopedCoverageLines(entriesMap, fileIndexMap)
-	instrLinesScoped := make(map[int][]int, len(scopedInstrLines))
-	for fi, lineSet := range scopedInstrLines {
-		sorted := make([]int, 0, len(lineSet))
-		for line := range lineSet {
-			sorted = append(sorted, line)
+	// Compute instrumented lines within CoverWithName scope. A
+	// passedBlocksOnly report does not record that scope.
+	var instrLinesScoped map[int][]int
+	if !report.Metadata.PassedBlocksOnly {
+		scopedInstrLines := collectScopedCoverageLines(entriesMap, fileIndexMap)
+		instrLinesScoped = make(map[int][]int, len(scopedInstrLines))
+		for fi, lineSet := range scopedInstrLines {
+			sorted := make([]int, 0, len(lineSet))
+			for line := range lineSet {
+				sorted = append(sorted, line)
+			}
+			sort.Ints(sorted)
+			instrLinesScoped[fi] = sorted
 		}
-		sort.Ints(sorted)
-		instrLinesScoped[fi] = sorted
 	}
 
 	// Compute coverage from allcounts (if available)
@@ -420,6 +431,7 @@ func buildTobarifmtData(report *tobari.CoverReport, entriesMap map[string][]toba
 		InstrLinesAll:    instrLinesAll,
 		InstrLinesScoped: instrLinesScoped,
 		AllCoverage:      allCoverage,
+		PassedBlocksOnly: report.Metadata.PassedBlocksOnly,
 	}
 }
 

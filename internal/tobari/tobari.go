@@ -201,7 +201,9 @@ func (e *TraceEntry) CoverprofileMap() map[string]*CoverEntry {
 		if block == nil {
 			continue
 		}
-		resolveCandidateFuncMap(block.Function, hitCandidateFuncMap)
+		if !passedBlocksOnly {
+			resolveCandidateFuncMap(block.Function, hitCandidateFuncMap)
+		}
 		newCoverprofileMap[bid] = &CoverEntry{
 			FileName:  block.FileName,
 			StartLine: block.Start.Line,
@@ -229,6 +231,15 @@ func (e *TraceEntry) CoverprofileMap() map[string]*CoverEntry {
 		}
 	}
 	return newCoverprofileMap
+}
+
+// PassedBlocksOnly reports whether scoped results hold only the blocks that
+// were actually passed. When true, blocks that could have been passed but were
+// not are absent from every scoped result, and deriving "places that should be
+// passed" is left to the consumer (for example from all instrumented blocks).
+func PassedBlocksOnly() bool {
+	decodeRawMetas()
+	return passedBlocksOnly
 }
 
 func resolveCandidateFuncMap(fn *Function, fnMap map[*Function]struct{}) {
@@ -328,6 +339,9 @@ var (
 	rawMetasOnce           sync.Once
 	pendingSuppDeps        map[string][]string
 	pendingSuppDepsMu      sync.Mutex
+	// passedBlocksOnly is decided once by decodeRawMetas and immutable
+	// afterwards, so readers that went through decodeRawMetas need no lock.
+	passedBlocksOnly bool
 )
 
 type chanLinks struct {
@@ -503,6 +517,13 @@ type Metadata struct {
 	PkgName    string
 	ModulePath string
 	Funcs      []*Function
+	// PassedBlocksOnly is set when the package was instrumented with
+	// --passed-blocks-only. It travels with the instrumented packages rather
+	// than with the main hook because the option is part of the cover tool's
+	// build cache identity: every instrumented package linked into a binary
+	// was produced under the same setting, whereas a main package that is not
+	// itself instrumented would keep a stale hook across a toggle.
+	PassedBlocksOnly bool `json:"PassedBlocksOnly,omitempty"`
 }
 
 type Function struct {
@@ -640,6 +661,10 @@ func decodeRawMetas() {
 			mdMu.Lock()
 			mds = append(mds, &md)
 			mdMu.Unlock()
+
+			if md.PassedBlocksOnly {
+				passedBlocksOnly = true
+			}
 		}
 
 		// Apply pending supplementary deps now that funcMap is populated.
@@ -715,6 +740,9 @@ type CoverReportData struct {
 	All       [][]int
 	Counts    []CoverReportCountData
 	AllCounts []int
+	// PassedBlocksOnly states that Counts hold only the blocks that were
+	// actually passed; see PassedBlocksOnly.
+	PassedBlocksOnly bool
 }
 
 // CoverReportCountData holds a test name and its coverage entries.
@@ -832,11 +860,12 @@ func CollectCoverReportData() *CoverReportData {
 	}
 
 	return &CoverReportData{
-		Files:     files,
-		Entry:     []string{"FileName", "StartLine", "StartCol", "EndLine", "EndCol", "StatementCount"},
-		All:       all,
-		Counts:    counts,
-		AllCounts: allCounts,
+		Files:            files,
+		Entry:            []string{"FileName", "StartLine", "StartCol", "EndLine", "EndCol", "StatementCount"},
+		All:              all,
+		Counts:           counts,
+		AllCounts:        allCounts,
+		PassedBlocksOnly: passedBlocksOnly,
 	}
 }
 
@@ -845,9 +874,10 @@ func CollectCoverReportData() *CoverReportData {
 func MarshalCoverJSON() ([]byte, error) {
 	data := CollectCoverReportData()
 	type jsonMetadata struct {
-		Files []string `json:"files"`
-		Entry []string `json:"entry"`
-		All   [][]int  `json:"all"`
+		Files            []string `json:"files"`
+		Entry            []string `json:"entry"`
+		All              [][]int  `json:"all"`
+		PassedBlocksOnly bool     `json:"passedBlocksOnly,omitempty"`
 	}
 	type jsonCount struct {
 		Name         string  `json:"name"`
@@ -864,9 +894,10 @@ func MarshalCoverJSON() ([]byte, error) {
 	}
 	return json.Marshal(jsonReport{
 		Metadata: jsonMetadata{
-			Files: data.Files,
-			Entry: data.Entry,
-			All:   data.All,
+			Files:            data.Files,
+			Entry:            data.Entry,
+			All:              data.All,
+			PassedBlocksOnly: data.PassedBlocksOnly,
 		},
 		Counts:    counts,
 		AllCounts: data.AllCounts,
@@ -889,6 +920,9 @@ func MarshalReportDataTOON(data *CoverReportData) ([]byte, error) {
 		fmt.Fprintf(&buf, "    %s\n", f)
 	}
 	fmt.Fprintf(&buf, "  entry: %s\n", strings.Join(data.Entry, ","))
+	if data.PassedBlocksOnly {
+		fmt.Fprintf(&buf, "  passedBlocksOnly: true\n")
+	}
 	fmt.Fprintf(&buf, "  all[%d]:\n", len(data.All))
 	for _, block := range data.All {
 		if len(block) != 6 {

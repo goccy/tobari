@@ -22,7 +22,7 @@ Go's build system assigns a unique `$WORK/bNNN/` directory to each package build
 
 | File | Writer | Reader | Purpose |
 |---|---|---|---|
-| `tobari_suppdeps.json` | cover tool | compile tool | Supplementary dependency map for whole-program analysis |
+| `tobari_suppdeps.json` | cover tool | compile tool | Supplementary dependency map for whole-program analysis (not written with `--passed-blocks-only`) |
 | `covervars.go` | cover tool | compiler | Coverage variables and embedded source code |
 | `tobari_pkgs.json` | compile tool | link tool | tobari package export path map |
 

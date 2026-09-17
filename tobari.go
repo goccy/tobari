@@ -16,6 +16,10 @@ import (
 	"github.com/goccy/tobari/internal/tobari"
 )
 
+// ErrMixedPassedBlocksOnly is returned by MergeCoverReports when some reports
+// were produced with --passed-blocks-only and others were not.
+var ErrMixedPassedBlocksOnly = errors.New("cannot merge reports that disagree on metadata.passedBlocksOnly")
+
 // Mode corresponds to the mode in the coverprofile format.
 type Mode string
 
@@ -91,9 +95,26 @@ func WriteAllCoverprofile(mode Mode, w io.Writer) {
 	tobari.WriteAllCoverprofile(string(mode), w)
 }
 
+// PassedBlocksOnly reports whether the binary was built with the
+// --passed-blocks-only option.
+//
+// When it returns true, every result scoped by Cover or CoverWithName holds
+// only the blocks that were actually passed: blocks that could have been passed
+// but were not are absent rather than reported with a zero count. Deriving
+// "places that should be passed" is then left to the caller, for example from
+// WriteAllCoverprofile or CoverReport.Metadata.All.
+//
+// The coverprofile text format has no place to carry this, so a profile written
+// by WriteCoverprofile or WriteCoverprofileByName in this mode reads as fully
+// covered when handed to `go tool cover` on its own.
+func PassedBlocksOnly() bool {
+	return tobari.PassedBlocksOnly()
+}
+
 // WriteCoverprofile writes coverprofile data based on the coverage range measured by Cover or CoverWithName.
 // Parts that are not invoked via the Cover or CoverWithName methods are not counted.
 // Also, unreachable ranges are calculated based on the paths that were actually called.
+// See PassedBlocksOnly for how the --passed-blocks-only option changes the output.
 func WriteCoverprofile(mode Mode, w io.Writer) {
 	tobari.WriteCoverprofile(string(mode), w)
 }
@@ -110,6 +131,9 @@ type Coverprofile struct {
 	Mode Mode
 	// Entries contains the list of coverage entries.
 	Entries []*Entry
+	// PassedBlocksOnly states that Entries hold only the blocks that were
+	// actually passed. See the PassedBlocksOnly function.
+	PassedBlocksOnly bool
 }
 
 // Entry represents a coverage entry for a source file.
@@ -137,8 +161,9 @@ type EntryPos struct {
 // CoverprofileByName retrieve coverage data for the specified name.
 func CoverprofileByName(name string, mode Mode) *Coverprofile {
 	return &Coverprofile{
-		Mode:    mode,
-		Entries: toEntries(tobari.CoverEntriesByName(name)),
+		Mode:             mode,
+		Entries:          toEntries(tobari.CoverEntriesByName(name)),
+		PassedBlocksOnly: tobari.PassedBlocksOnly(),
 	}
 }
 
@@ -146,11 +171,13 @@ func CoverprofileByName(name string, mode Mode) *Coverprofile {
 // it outputs the correspondence between the names and the coverprofile data for each name.
 func CoverprofileMap(mode Mode) map[string]*Coverprofile {
 	entriesMap := tobari.CoverEntriesMap()
+	passedBlocksOnly := tobari.PassedBlocksOnly()
 	coverprofMap := make(map[string]*Coverprofile, len(entriesMap))
 	for name, entries := range entriesMap {
 		coverprofMap[name] = &Coverprofile{
-			Mode:    mode,
-			Entries: toEntries(entries),
+			Mode:             mode,
+			Entries:          toEntries(entries),
+			PassedBlocksOnly: passedBlocksOnly,
 		}
 	}
 	return coverprofMap
@@ -195,6 +222,11 @@ type CoverReportMetadata struct {
 	Files []string `json:"files"`
 	Entry []string `json:"entry"`
 	All   [][]int  `json:"all"`
+	// PassedBlocksOnly states that every CoverReportCount holds only the
+	// blocks that were actually passed. Blocks that could have been passed but
+	// were not are absent, so deriving "places that should be passed" is left
+	// to the consumer, for example from All.
+	PassedBlocksOnly bool `json:"passedBlocksOnly,omitempty"`
 }
 
 // CoverReportCount holds a test name and its coverage entries.
@@ -216,9 +248,10 @@ func CollectCoverReport() *CoverReport {
 	}
 	return &CoverReport{
 		Metadata: CoverReportMetadata{
-			Files: data.Files,
-			Entry: data.Entry,
-			All:   data.All,
+			Files:            data.Files,
+			Entry:            data.Entry,
+			All:              data.All,
+			PassedBlocksOnly: data.PassedBlocksOnly,
 		},
 		Counts:    counts,
 		AllCounts: data.AllCounts,
@@ -300,19 +333,30 @@ func (r *CoverReport) MarshalTOON() ([]byte, error) {
 		}
 	}
 	return tobari.MarshalReportDataTOON(&tobari.CoverReportData{
-		Files:  r.Metadata.Files,
-		Entry:  r.Metadata.Entry,
-		All:    r.Metadata.All,
-		Counts: counts,
+		Files:            r.Metadata.Files,
+		Entry:            r.Metadata.Entry,
+		All:              r.Metadata.All,
+		Counts:           counts,
+		PassedBlocksOnly: r.Metadata.PassedBlocksOnly,
 	})
 }
 
 // MergeCoverReports merges multiple CoverReport values into a single unified report.
 // File lists and block definitions are unified with deduplication, block indices
 // in Counts are remapped accordingly, and AllCounts are summed per block.
+//
+// All reports must agree on Metadata.PassedBlocksOnly. A report that records
+// zero-count blocks and one that omits them give the absence of a block
+// different meanings, so a mixed merge has no faithful result and is rejected.
 func MergeCoverReports(reports []*CoverReport) (*CoverReport, error) {
 	if len(reports) == 0 {
 		return nil, fmt.Errorf("no reports to merge")
+	}
+	passedBlocksOnly := reports[0].Metadata.PassedBlocksOnly
+	for _, r := range reports[1:] {
+		if r.Metadata.PassedBlocksOnly != passedBlocksOnly {
+			return nil, ErrMixedPassedBlocksOnly
+		}
 	}
 
 	// Build unified sorted file list.
@@ -420,9 +464,10 @@ func MergeCoverReports(reports []*CoverReport) (*CoverReport, error) {
 
 	return &CoverReport{
 		Metadata: CoverReportMetadata{
-			Files: unifiedFiles,
-			Entry: reports[0].Metadata.Entry,
-			All:   unifiedAll,
+			Files:            unifiedFiles,
+			Entry:            reports[0].Metadata.Entry,
+			All:              unifiedAll,
+			PassedBlocksOnly: passedBlocksOnly,
 		},
 		Counts:    mergedCounts,
 		AllCounts: allCounts,

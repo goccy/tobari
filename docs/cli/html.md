@@ -25,6 +25,17 @@ tobari html [-o cover.html] [-b binary | -s sources.tar.gz] <tobari.json-or-cove
 
 When given a `tobari.json` file, the generated HTML is a fully self-contained single file with no external dependencies. It automatically adapts to dark mode based on the OS/browser setting (`prefers-color-scheme: dark`). It consists of three tabs.
 
+### Reports with `passedBlocksOnly`
+
+A `tobari.json` produced by a binary built with `--passed-blocks-only` carries `"passedBlocksOnly": true` in its `metadata`. Its per-test entries contain only the blocks that were actually passed; blocks that could have been passed but were not are absent, and deriving a denominator is left to the consumer.
+
+`tobari html` derives it from all instrumented lines (`metadata.all`). For such a report:
+
+- **Coverage percentages** of the selected tests (including the per-file percentages in the file dropdown) and of each top-level test in the Summary tab are computed against all instrumented lines instead of the lines reachable from the tests. Percentages are therefore lower than for a default report of the same run, and are not comparable with it.
+- **Uncovered (red) lines** are all instrumented lines that no selected test passed.
+- **Compare mode** treats all instrumented lines as the candidate lines for both tests.
+- **Overlap rate** signatures only ever have the "covered" status, so the rate is the Jaccard similarity of the passed blocks alone. In a default report, blocks that both tests could have passed but did not also count as common signatures.
+
 ### Coverage Tab
 
 The main view for visualizing per-test coverage on source code.

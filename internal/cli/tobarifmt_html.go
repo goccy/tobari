@@ -580,7 +580,13 @@ function getInstrLineSets() {
   return state.coverageMode === 'all' ? instrLineSetsAll : getSelectedInstrLineSets();
 }
 
+// A passedBlocksOnly report records only the lines each test passed, so a
+// test carries no instrumented-line set of its own. The denominator is then
+// derived here from all instrumented lines.
 function getSelectedInstrLineSets() {
+  if (DATA.passedBlocksOnly) {
+    return state.selectedTests.size > 0 ? instrLineSetsAll : {};
+  }
   const merged = {};
   DATA.tests.forEach(t => {
     if (!state.selectedTests.has(t.n) || !t.i) return;
@@ -629,6 +635,7 @@ function buildDiffList(testA, testB) {
 }
 
 function getTestGroupInstrLines(testA, testB) {
+  if (DATA.passedBlocksOnly) return instrLineSetsAll;
   const merged = {};
   DATA.tests.forEach(t => {
     if (!t.i) return;
@@ -1051,9 +1058,16 @@ function renderSummary() {
   const testBody = document.querySelector('#test-coverage-table tbody');
   testBody.innerHTML = '';
   const topLevelMap = {};
+  let allInstrKeys = null;
+  if (DATA.passedBlocksOnly) {
+    allInstrKeys = new Set();
+    for (const [fi, instrSet] of Object.entries(instrLineSetsAll)) {
+      instrSet.forEach(l => allInstrKeys.add(fi + ':' + l));
+    }
+  }
   DATA.tests.forEach(t => {
     const topName = t.n.split('/')[0];
-    if (!topLevelMap[topName]) topLevelMap[topName] = { covered: new Set(), instr: new Set() };
+    if (!topLevelMap[topName]) topLevelMap[topName] = { covered: new Set(), instr: allInstrKeys || new Set() };
     if (t.i) {
       for (const [fi, lines] of Object.entries(t.i)) {
         lines.forEach(l => topLevelMap[topName].instr.add(fi + ':' + l));

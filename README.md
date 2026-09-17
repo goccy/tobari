@@ -177,6 +177,51 @@ they are what the analysis exists to measure. Naming one is silently ignored.
 > build cache key for coverage-instrumented packages only, so toggling it
 > rebuilds those without invalidating the rest of the dependency closure.
 
+### Recording Only the Passed Blocks
+
+By default, a scoped result contains both terms of the Scoped Coverage formula:
+the *places passed*, and the *places that should be passed* (reported as blocks
+with a zero count). With `--passed-blocks-only`, tobari records only the blocks
+that were actually passed and leaves deriving the places that should be passed
+to whoever consumes the result:
+
+```console
+GOFLAGS="$(tobari flags -passed-blocks-only)" go build .
+```
+
+What changes:
+
+- Every result scoped by `Cover` / `CoverWithName` — `WriteCoverprofile`,
+  `WriteCoverprofileByName`, `CoverprofileByName`, `CoverprofileMap`,
+  `CollectCoverReport`, and the `tobari.json` / `tobari.toon` written by
+  `go test` — contains only blocks with a count greater than zero. A block that
+  is absent was not passed; whether it *should* have been passed is not stated.
+- The result says so explicitly: `tobari.json` carries
+  `"passedBlocksOnly": true` in its `metadata`, `CoverReport.Metadata` and
+  `Coverprofile` have a `PassedBlocksOnly` field, and `tobari.PassedBlocksOnly()`
+  reports it at runtime. Consumers should check this flag instead of assuming
+  that zero-count blocks are present.
+- Which goroutines are counted does not change. Only blocks passed inside the
+  `Cover` / `CoverWithName` scope are recorded, exactly as without the option.
+- `WriteAllCoverprofile`, `metadata.all`, `allcounts`, and the `coverage: N%`
+  line and `-coverprofile` output of `go test` do not change. They describe all
+  instrumented blocks, which makes them a natural source for a denominator.
+
+Because the places that should be passed are no longer reported, tobari has no
+use for the whole-program dependency analysis that computes them and does not
+run it, so builds are faster. For the same reason `--exclude-analysis` cannot be
+combined with this option.
+
+> **Note**: the coverprofile text format has no place to carry the flag. A
+> profile written by `WriteCoverprofile` or `WriteCoverprofileByName` in this
+> mode lists only passed blocks, so `go tool cover` on that file alone reports
+> 100%. Combine it with `WriteAllCoverprofile` to get a meaningful percentage.
+
+`tobari html` derives the denominator from all instrumented blocks for such a
+report, and `tobari merge json` refuses to merge reports that disagree on
+`passedBlocksOnly`. Toggling the option rebuilds coverage-instrumented packages
+only, like `--exclude-analysis`.
+
 ### Embedding Source Code
 
 Tobari supports embedding the original source code into instrumented binaries with the `--embed-code` (`-E`) option. This is useful for archiving the exact source that was compiled, enabling offline coverage analysis without access to the original source tree.

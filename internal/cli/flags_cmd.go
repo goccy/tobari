@@ -15,17 +15,23 @@ func (c *CLI) runFlagsCmd(ctx context.Context, tobariBinPath string, args []stri
 	fs.BoolVar(embedCode, "E", false, "embed source code into the instrumented binary (shorthand)")
 	tags := fs.String("tags", "", "build tags (same as go build -tags)")
 	excludeAnalysis := fs.String("exclude-analysis", "", "comma-separated package path prefixes to exclude from dependency analysis")
+	passedBlocksOnly := fs.Bool("passed-blocks-only", false, "record only the blocks that were actually passed")
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	for _, arg := range fs.Args() {
 		if strings.HasPrefix(arg, "-") {
-			return fmt.Errorf("flags must be specified before other arguments\nUsage: tobari flags [--embed-code | -E] [-tags=VALUE] [-exclude-analysis=PREFIX,...]")
+			return fmt.Errorf("flags must be specified before other arguments\nUsage: tobari flags [--embed-code | -E] [-tags=VALUE] [-exclude-analysis=PREFIX,...] [-passed-blocks-only]")
 		}
 	}
 
-	out, err := flags.Run(ctx, tobariBinPath, *embedCode, *tags, *excludeAnalysis)
+	out, err := flags.Run(ctx, tobariBinPath, flags.Options{
+		EmbedCode:        *embedCode,
+		Tags:             *tags,
+		ExcludeAnalysis:  *excludeAnalysis,
+		PassedBlocksOnly: *passedBlocksOnly,
+	})
 	if err != nil {
 		return err
 	}
