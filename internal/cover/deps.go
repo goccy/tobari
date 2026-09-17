@@ -85,7 +85,6 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/callgraph"
-	"golang.org/x/tools/go/callgraph/cha"
 	"golang.org/x/tools/go/callgraph/rta"
 	"golang.org/x/tools/go/callgraph/vta"
 	"golang.org/x/tools/go/packages"
@@ -527,7 +526,13 @@ func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *Packa
 	for fn := range rtaResult.Reachable {
 		vtaFuncs[fn] = true
 	}
-	vtaGraph := vta.CallGraph(vtaFuncs, cha.CallGraph(prog))
+	// The initial call graph VTA refines is left to vta.CallGraph (nil):
+	// it then resolves candidates with a lazy class-hierarchy lookup over
+	// vtaFuncs, keyed by signature and method id and memoized per interface
+	// method, instead of a cha.CallGraph built eagerly for every function in
+	// the program and searched linearly per call site. Candidates outside
+	// vtaFuncs are unreachable by RTA, so the same edges are confirmed.
+	vtaGraph := vta.CallGraph(vtaFuncs, nil)
 
 	followable := newFollowableCallees(graph, vtaGraph)
 	frontierSets := newFrontiers(graph, followable, coverPkgSet)
