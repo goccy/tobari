@@ -530,8 +530,19 @@ func CreateMainDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *Packa
 	// it then resolves candidates with a lazy class-hierarchy lookup over
 	// vtaFuncs, keyed by signature and method id and memoized per interface
 	// method, instead of a cha.CallGraph built eagerly for every function in
-	// the program and searched linearly per call site. Candidates outside
-	// vtaFuncs are unreachable by RTA, so the same edges are confirmed.
+	// the program and searched linearly per call site.
+	//
+	// The two candidate sets differ in both directions, and neither
+	// difference can cost a dependency. A candidate only the eager graph
+	// offers is not RTA-reachable, so no RTA edge names it and followEdge
+	// never asks about it. Conversely, the eager graph's nodes come from
+	// ssautil.AllFunctions, which misses RTA-reachable synthetic wrappers
+	// (a promoted method of an anonymous struct type is not a package
+	// member, not a method of an exported named type, and need not appear
+	// in RuntimeTypes), and VTA resolves a call site in a function it has
+	// no node for to no callees at all — so the eager initial graph could
+	// drop edges this one keeps. Any difference is therefore in the
+	// direction of confirming more RTA edges, never fewer.
 	vtaGraph := vta.CallGraph(vtaFuncs, nil)
 
 	followable := newFollowableCallees(graph, vtaGraph)
