@@ -1300,8 +1300,8 @@ func TestGreeting(t *testing.T) {
 }
 
 // TestPassedBlocksOnly verifies the --passed-blocks-only contract on a real
-// build: the report states metadata.passedBlocksOnly, every scoped entry is a
-// block that was actually passed, and nothing else about the report changes.
+// build: every count states passedBlocksOnly, every scoped entry is a block
+// that was actually passed, and nothing else about the report changes.
 //
 // The expectation is derived from a default build of the same tests rather
 // than from a golden file: a passed-blocks-only report must equal the default
@@ -1357,14 +1357,10 @@ func TestPassedBlocksOnly(t *testing.T) {
 
 	checkPassedOnly := func(t *testing.T, got, base *tobari.CoverReport) {
 		t.Helper()
-		if !got.Metadata.PassedBlocksOnly {
-			t.Fatal("metadata.passedBlocksOnly must be true")
-		}
 		want := &tobari.CoverReport{
 			Metadata:  base.Metadata,
 			AllCounts: base.AllCounts,
 		}
-		want.Metadata.PassedBlocksOnly = true
 		for _, c := range base.Counts {
 			passed := make([][]int, 0, len(c.Coverprofile))
 			for _, cp := range c.Coverprofile {
@@ -1372,7 +1368,7 @@ func TestPassedBlocksOnly(t *testing.T) {
 					passed = append(passed, cp)
 				}
 			}
-			want.Counts = append(want.Counts, &tobari.CoverReportCount{Name: c.Name, Coverprofile: passed})
+			want.Counts = append(want.Counts, &tobari.CoverReportCount{Name: c.Name, Coverprofile: passed, PassedBlocksOnly: true})
 		}
 		if diff := cmp.Diff(want, got); diff != "" {
 			t.Errorf("passed-blocks-only report mismatch (-want +got):\n%s", diff)
@@ -1382,11 +1378,11 @@ func TestPassedBlocksOnly(t *testing.T) {
 	first := runReport(t, "-passed-blocks-only")
 
 	base := runReport(t)
-	if base.Metadata.PassedBlocksOnly {
-		t.Fatal("metadata.passedBlocksOnly must be false without the option")
-	}
 	var zeroCounts int
 	for _, c := range base.Counts {
+		if c.PassedBlocksOnly {
+			t.Fatalf("count %q must not state passedBlocksOnly without the option", c.Name)
+		}
 		for _, cp := range c.Coverprofile {
 			if cp[1] == 0 {
 				zeroCounts++
@@ -1434,5 +1430,36 @@ func TestPassedBlocksOnlyRejectsExcludeAnalysis(t *testing.T) {
 	cmd.Env = append(os.Environ(), "GOCACHE="+t.TempDir())
 	if out, err := cmd.CombinedOutput(); err == nil {
 		t.Fatalf("toolexec must reject the combination, got: %s", string(out))
+	}
+}
+
+// A tobari.json written before sources and per-count flags existed carries
+// neither field; it must read as one program made of every file whose counts
+// record the blocks that could have been passed.
+func TestCoverReportDefaultsForOlderJSON(t *testing.T) {
+	var report tobari.CoverReport
+	if err := json.Unmarshal([]byte(`{
+		"metadata": {"files": ["/src/a.go", "/src/b.go"], "entry": [], "all": [[0, 1, 1, 2, 2, 1], [1, 1, 1, 2, 2, 1]]},
+		"counts": [{"name": "TestA", "coverprofile": [[0, 1], [1, 0]]}],
+		"allcounts": [1, 0]
+	}`), &report); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := report.SourceFiles(0), []int{0, 1}; !cmp.Equal(got, want) {
+		t.Errorf("SourceFiles(0) = %v, want %v", got, want)
+	}
+	if report.SourceFiles(1) != nil {
+		t.Errorf("SourceFiles(1) = %v, want nil", report.SourceFiles(1))
+	}
+	c := report.Counts[0]
+	if c.PassedBlocksOnly || c.Source != 0 {
+		t.Errorf("count = %+v, want passedBlocksOnly=false source=0", c)
+	}
+	merged, err := tobari.MergeCoverReports([]*tobari.CoverReport{&report, &report})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Metadata.Sources != nil {
+		t.Errorf("merging one program with itself must keep the implicit source, got %v", merged.Metadata.Sources)
 	}
 }

@@ -152,16 +152,20 @@ func TestCoverprofileMapPassedBlocksOnly(t *testing.T) {
 	}
 }
 
-// The report must state passedBlocksOnly in its metadata so that a consumer
-// knows zero-count blocks are absent rather than out of scope, and must not
-// mention it at all otherwise, keeping default reports byte-identical.
+// Every count of the report must state passedBlocksOnly so that a consumer
+// knows zero-count blocks are absent rather than out of scope, and no count
+// may mention it otherwise, keeping default reports byte-identical.
 func TestMarshalCoverPassedBlocksOnly(t *testing.T) {
 	setupTestCoverMeta(t)
+	root := newTraceG(2)
+	root.addCounter(blockID(testFileName, 1))
+	setEntry("marshal-passed-blocks-only", &TraceEntry{Name: "marshal-passed-blocks-only", Roots: []*TraceG{root}})
 
 	type report struct {
-		Metadata map[string]json.RawMessage `json:"metadata"`
+		Metadata map[string]json.RawMessage   `json:"metadata"`
+		Counts   []map[string]json.RawMessage `json:"counts"`
 	}
-	metadataKeys := func(t *testing.T) map[string]json.RawMessage {
+	marshal := func(t *testing.T) report {
 		t.Helper()
 		b, err := MarshalCoverJSON()
 		if err != nil {
@@ -171,25 +175,36 @@ func TestMarshalCoverPassedBlocksOnly(t *testing.T) {
 		if err := json.Unmarshal(b, &r); err != nil {
 			t.Fatal(err)
 		}
-		return r.Metadata
+		if len(r.Counts) == 0 {
+			t.Fatal("report has no counts")
+		}
+		return r
 	}
 
-	if v, exists := metadataKeys(t)["passedBlocksOnly"]; exists {
-		t.Fatalf("default report must not carry passedBlocksOnly, got %s", v)
+	r := marshal(t)
+	for _, c := range r.Counts {
+		if v, exists := c["passedBlocksOnly"]; exists {
+			t.Fatalf("default report must not carry passedBlocksOnly, got %s", v)
+		}
+	}
+	if v, exists := r.Metadata["sources"]; exists {
+		t.Fatalf("a runtime report has a single implicit source, got sources=%s", v)
 	}
 
 	passedBlocksOnly = true
 	t.Cleanup(func() { passedBlocksOnly = false })
 
-	if v := string(metadataKeys(t)["passedBlocksOnly"]); v != "true" {
-		t.Fatalf("metadata.passedBlocksOnly = %q, want true", v)
+	for _, c := range marshal(t).Counts {
+		if v := string(c["passedBlocksOnly"]); v != "true" {
+			t.Fatalf("counts[].passedBlocksOnly = %q, want true", v)
+		}
 	}
 	toon, err := MarshalCoverTOON()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(toon, []byte("  passedBlocksOnly: true\n")) {
-		t.Errorf("TOON metadata must state passedBlocksOnly:\n%s", toon)
+	if !bytes.Contains(toon, []byte("passedBlocksOnly[")) || !bytes.Contains(toon, []byte("\n  marshal-passed-blocks-only\n")) {
+		t.Errorf("TOON must list the passedBlocksOnly tests:\n%s", toon)
 	}
 }
 

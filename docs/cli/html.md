@@ -25,16 +25,16 @@ tobari html [-o cover.html] [-b binary | -s sources.tar.gz] <tobari.json-or-cove
 
 When given a `tobari.json` file, the generated HTML is a fully self-contained single file with no external dependencies. It automatically adapts to dark mode based on the OS/browser setting (`prefers-color-scheme: dark`). It consists of three tabs.
 
-### Reports with `passedBlocksOnly`
+### Tests with `passedBlocksOnly`
 
-A `tobari.json` produced by a binary built with `--passed-blocks-only` carries `"passedBlocksOnly": true` in its `metadata`. Its per-test entries contain only the blocks that were actually passed; blocks that could have been passed but were not are absent, and deriving a denominator is left to the consumer.
+In a `tobari.json` produced by a binary built with `--passed-blocks-only`, every entry of `counts` carries `"passedBlocksOnly": true`. Such a test's entries contain only the blocks that were actually passed; blocks that could have been passed but were not are absent, and deriving a denominator is left to the consumer. A merged report can hold such tests next to tests that record both.
 
-`tobari html` derives it from all instrumented lines (`metadata.all`). For such a report:
+`tobari html` takes, for each such test, all instrumented lines of the program that ran it: every file of the test's source (`metadata.sources[counts[].source]`, or every file when the report has a single source). For those tests:
 
-- **Coverage percentages** of the selected tests (including the per-file percentages in the file dropdown) and of each top-level test in the Summary tab are computed against all instrumented lines instead of the lines reachable from the tests. Percentages are therefore lower than for a default report of the same run, and are not comparable with it.
-- **Uncovered (red) lines** are all instrumented lines that no selected test passed.
-- **Compare mode** treats all instrumented lines as the candidate lines for both tests.
-- **Overlap rate** signatures only ever have the "covered" status, so the rate is the Jaccard similarity of the passed blocks alone. In a default report, blocks that both tests could have passed but did not also count as common signatures.
+- **Coverage percentages** of the selected tests (including the per-file percentages in the file dropdown) and of each top-level test in the Summary tab are computed against all instrumented lines of the program instead of the lines reachable from the test. Percentages are therefore lower than for a default report of the same run, and are not comparable with it. Tests that record both terms keep their own denominator, also when both kinds are selected together.
+- **Uncovered (red) lines** are all instrumented lines of the program that no selected test passed.
+- **Compare mode** treats all instrumented lines of the program as the candidate lines of such a test.
+- **Overlap rate** signatures of such a test only ever have the "covered" status, so between two such tests the rate is the Jaccard similarity of the passed blocks alone. In a default report, blocks that both tests could have passed but did not also count as common signatures.
 
 ### Coverage Tab
 

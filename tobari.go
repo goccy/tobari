@@ -10,15 +10,12 @@ import (
 	"io"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/goccy/tobari/internal/tobari"
 )
-
-// ErrMixedPassedBlocksOnly is returned by MergeCoverReports when some reports
-// were produced with --passed-blocks-only and others were not.
-var ErrMixedPassedBlocksOnly = errors.New("cannot merge reports that disagree on metadata.passedBlocksOnly")
 
 // Mode corresponds to the mode in the coverprofile format.
 type Mode string
@@ -222,17 +219,52 @@ type CoverReportMetadata struct {
 	Files []string `json:"files"`
 	Entry []string `json:"entry"`
 	All   [][]int  `json:"all"`
-	// PassedBlocksOnly states that every CoverReportCount holds only the
-	// blocks that were actually passed. Blocks that could have been passed but
-	// were not are absent, so deriving "places that should be passed" is left
-	// to the consumer, for example from All.
-	PassedBlocksOnly bool `json:"passedBlocksOnly,omitempty"`
+	// Sources lists the programs whose results this report contains, each as
+	// the indices into Files of the files that program instrumented. A report
+	// written by a running binary has a single source consisting of every
+	// file, and leaves this empty; MergeCoverReports fills it in when it
+	// merges reports of programs with different file sets. Every
+	// CoverReportCount refers to one source, which is what defines "all
+	// instrumented blocks" for that count (see CoverReport.SourceFiles).
+	Sources [][]int `json:"sources,omitempty"`
 }
 
 // CoverReportCount holds a test name and its coverage entries.
 type CoverReportCount struct {
 	Name         string  `json:"name"`
 	Coverprofile [][]int `json:"coverprofile"`
+	// PassedBlocksOnly states that Coverprofile holds only the blocks that
+	// were actually passed: the binary was built with --passed-blocks-only.
+	// Blocks that could have been passed but were not are absent instead of
+	// listed with a zero count, so deriving "places that should be passed" is
+	// left to the consumer. The blocks of the count's source (see Source) are
+	// the natural denominator.
+	PassedBlocksOnly bool `json:"passedBlocksOnly,omitempty"`
+	// Source is the index into CoverReportMetadata.Sources of the program
+	// that produced this count. Zero, the default, is the only value in a
+	// report written by a running binary.
+	Source int `json:"source,omitempty"`
+}
+
+// SourceFiles returns the indices into Metadata.Files of the files that the
+// given source instrumented. When Metadata.Sources is empty the report has a
+// single source made of every file, so every index is returned for source 0.
+// An index that names no source returns nil.
+func (r *CoverReport) SourceFiles(source int) []int {
+	if len(r.Metadata.Sources) == 0 {
+		if source != 0 {
+			return nil
+		}
+		files := make([]int, len(r.Metadata.Files))
+		for i := range files {
+			files[i] = i
+		}
+		return files
+	}
+	if source < 0 || source >= len(r.Metadata.Sources) {
+		return nil
+	}
+	return r.Metadata.Sources[source]
 }
 
 // CollectCoverReport collects the current coverage data measured by
@@ -242,16 +274,16 @@ func CollectCoverReport() *CoverReport {
 	counts := make([]*CoverReportCount, len(data.Counts))
 	for i, c := range data.Counts {
 		counts[i] = &CoverReportCount{
-			Name:         c.Name,
-			Coverprofile: c.Coverprofile,
+			Name:             c.Name,
+			Coverprofile:     c.Coverprofile,
+			PassedBlocksOnly: c.PassedBlocksOnly,
 		}
 	}
 	return &CoverReport{
 		Metadata: CoverReportMetadata{
-			Files:            data.Files,
-			Entry:            data.Entry,
-			All:              data.All,
-			PassedBlocksOnly: data.PassedBlocksOnly,
+			Files: data.Files,
+			Entry: data.Entry,
+			All:   data.All,
 		},
 		Counts:    counts,
 		AllCounts: data.AllCounts,
@@ -328,16 +360,18 @@ func (r *CoverReport) MarshalTOON() ([]byte, error) {
 	counts := make([]tobari.CoverReportCountData, len(r.Counts))
 	for i, c := range r.Counts {
 		counts[i] = tobari.CoverReportCountData{
-			Name:         c.Name,
-			Coverprofile: c.Coverprofile,
+			Name:             c.Name,
+			Coverprofile:     c.Coverprofile,
+			PassedBlocksOnly: c.PassedBlocksOnly,
+			Source:           c.Source,
 		}
 	}
 	return tobari.MarshalReportDataTOON(&tobari.CoverReportData{
-		Files:            r.Metadata.Files,
-		Entry:            r.Metadata.Entry,
-		All:              r.Metadata.All,
-		Counts:           counts,
-		PassedBlocksOnly: r.Metadata.PassedBlocksOnly,
+		Files:   r.Metadata.Files,
+		Entry:   r.Metadata.Entry,
+		All:     r.Metadata.All,
+		Sources: r.Metadata.Sources,
+		Counts:  counts,
 	})
 }
 
@@ -345,18 +379,14 @@ func (r *CoverReport) MarshalTOON() ([]byte, error) {
 // File lists and block definitions are unified with deduplication, block indices
 // in Counts are remapped accordingly, and AllCounts are summed per block.
 //
-// All reports must agree on Metadata.PassedBlocksOnly. A report that records
-// zero-count blocks and one that omits them give the absence of a block
-// different meanings, so a mixed merge has no faithful result and is rejected.
+// Each count keeps referring to the program that produced it: the sources of
+// all reports are carried over (deduplicated by file set) into
+// Metadata.Sources, and Source of every count is remapped. A count with
+// PassedBlocksOnly therefore keeps the same "all instrumented blocks" after a
+// merge as before, even when reports of different programs are merged.
 func MergeCoverReports(reports []*CoverReport) (*CoverReport, error) {
 	if len(reports) == 0 {
 		return nil, fmt.Errorf("no reports to merge")
-	}
-	passedBlocksOnly := reports[0].Metadata.PassedBlocksOnly
-	for _, r := range reports[1:] {
-		if r.Metadata.PassedBlocksOnly != passedBlocksOnly {
-			return nil, ErrMixedPassedBlocksOnly
-		}
 	}
 
 	// Build unified sorted file list.
@@ -418,10 +448,17 @@ func MergeCoverReports(reports []*CoverReport) (*CoverReport, error) {
 		}
 	}
 
+	// Unify sources by file set. Per-report mapping: old source idx -> new.
+	unifiedSources, sourceMaps := mergeSources(reports, fileIndex)
+
 	// Remap and concatenate counts.
 	mergedCounts := make([]*CoverReportCount, 0)
 	for i, r := range reports {
 		for _, c := range r.Counts {
+			newSource, ok := sourceMaps[i][c.Source]
+			if !ok {
+				return nil, fmt.Errorf("count %q refers to source %d, but report %d has %d sources", c.Name, c.Source, i, len(sourceMaps[i]))
+			}
 			newProfile := make([][]int, 0, len(c.Coverprofile))
 			for _, cp := range c.Coverprofile {
 				if len(cp) != 2 {
@@ -432,8 +469,10 @@ func MergeCoverReports(reports []*CoverReport) (*CoverReport, error) {
 				}
 			}
 			mergedCounts = append(mergedCounts, &CoverReportCount{
-				Name:         c.Name,
-				Coverprofile: newProfile,
+				Name:             c.Name,
+				Coverprofile:     newProfile,
+				PassedBlocksOnly: c.PassedBlocksOnly,
+				Source:           newSource,
 			})
 		}
 	}
@@ -464,14 +503,57 @@ func MergeCoverReports(reports []*CoverReport) (*CoverReport, error) {
 
 	return &CoverReport{
 		Metadata: CoverReportMetadata{
-			Files:            unifiedFiles,
-			Entry:            reports[0].Metadata.Entry,
-			All:              unifiedAll,
-			PassedBlocksOnly: passedBlocksOnly,
+			Files:   unifiedFiles,
+			Entry:   reports[0].Metadata.Entry,
+			All:     unifiedAll,
+			Sources: unifiedSources,
 		},
 		Counts:    mergedCounts,
 		AllCounts: allCounts,
 	}, nil
+}
+
+// mergeSources unifies the sources of the reports over the unified file list
+// (fileIndex maps a file name to its unified index). Two sources with the same
+// file set become one. It returns the unified sources, or nil when the only
+// remaining source spans every unified file (which is what an empty Sources
+// means), and, per report, the mapping from that report's source indices to
+// unified ones.
+func mergeSources(reports []*CoverReport, fileIndex map[string]int) ([][]int, []map[int]int) {
+	var unified [][]int
+	unifiedIndex := make(map[string]int)
+	sourceMaps := make([]map[int]int, len(reports))
+	for i, r := range reports {
+		sources := r.Metadata.Sources
+		if len(sources) == 0 {
+			sources = [][]int{r.SourceFiles(0)}
+		}
+		sourceMaps[i] = make(map[int]int, len(sources))
+		for oldIdx, oldFiles := range sources {
+			files := make([]int, 0, len(oldFiles))
+			for _, oldFileIdx := range oldFiles {
+				if oldFileIdx < 0 || oldFileIdx >= len(r.Metadata.Files) {
+					continue
+				}
+				files = append(files, fileIndex[r.Metadata.Files[oldFileIdx]])
+			}
+			sort.Ints(files)
+			files = slices.Compact(files)
+			// Map key only; it is never parsed back.
+			key := fmt.Sprint(files)
+			newIdx, ok := unifiedIndex[key]
+			if !ok {
+				newIdx = len(unified)
+				unifiedIndex[key] = newIdx
+				unified = append(unified, files)
+			}
+			sourceMaps[i][oldIdx] = newIdx
+		}
+	}
+	if len(unified) == 1 && len(unified[0]) == len(fileIndex) {
+		return nil, sourceMaps
+	}
+	return unified, sourceMaps
 }
 
 // ReadCoverArchivedFile extracts the original source files embedded during

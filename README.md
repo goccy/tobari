@@ -196,11 +196,13 @@ What changes:
   `CollectCoverReport`, and the `tobari.json` / `tobari.toon` written by
   `go test` — contains only blocks with a count greater than zero. A block that
   is absent was not passed; whether it *should* have been passed is not stated.
-- The result says so explicitly: `tobari.json` carries
-  `"passedBlocksOnly": true` in its `metadata`, `CoverReport.Metadata` and
-  `Coverprofile` have a `PassedBlocksOnly` field, and `tobari.PassedBlocksOnly()`
-  reports it at runtime. Consumers should check this flag instead of assuming
-  that zero-count blocks are present.
+- The result says so explicitly: every entry of `counts` in `tobari.json`
+  carries `"passedBlocksOnly": true`, `CoverReportCount` and `Coverprofile` have
+  a `PassedBlocksOnly` field, and `tobari.PassedBlocksOnly()` reports it at
+  runtime. Consumers should check this flag instead of assuming that zero-count
+  blocks are present. It is a property of each test's entries rather than of the
+  whole file because `tobari merge json` can combine reports built with and
+  without the option.
 - Which goroutines are counted does not change. Only blocks passed inside the
   `Cover` / `CoverWithName` scope are recorded, exactly as without the option.
 - `WriteAllCoverprofile`, `metadata.all`, `allcounts`, and the `coverage: N%`
@@ -217,10 +219,34 @@ combined with this option.
 > mode lists only passed blocks, so `go tool cover` on that file alone reports
 > 100%. Combine it with `WriteAllCoverprofile` to get a meaningful percentage.
 
-`tobari html` derives the denominator from all instrumented blocks for such a
-report, and `tobari merge json` refuses to merge reports that disagree on
-`passedBlocksOnly`. Toggling the option rebuilds coverage-instrumented packages
-only, like `--exclude-analysis`.
+`tobari html` uses all instrumented blocks of the program that ran the test as
+the denominator of such a test. Toggling the option rebuilds
+coverage-instrumented packages only, like `--exclude-analysis`.
+
+#### Merging reports of several programs
+
+`tobari merge json` keeps track of which program each test came from, so that
+"all instrumented blocks" keeps its meaning for a `passedBlocksOnly` test after
+a merge. When the merged reports come from programs with different file sets,
+the merged `metadata` gains a `sources` list, one entry per program holding the
+indices into `files` of the files it instrumented, and every entry of `counts`
+gains a `source` index into that list:
+
+```json
+"metadata": {"files": ["/svc1/main.go", "/svc2/main.go"], "all": [...], "sources": [[0], [1]]},
+"counts": [
+  {"name": "TestS1", "passedBlocksOnly": true, "coverprofile": [[0, 3]]},
+  {"name": "TestS2", "source": 1, "coverprofile": [[1, 3], [2, 0]]}
+]
+```
+
+Both fields are omitted when they hold their default: a report written by a
+running binary, or merged from reports of a single program, has one source
+consisting of every file, and every test belongs to source `0`. Programs are
+identified by their file set, so merging a report into a merged report again
+does not add sources. `CoverReport.SourceFiles` applies this rule for Go
+consumers. A `tobari.json` written before these fields existed reads exactly
+as before.
 
 ### Embedding Source Code
 

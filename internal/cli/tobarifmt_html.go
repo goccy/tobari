@@ -324,6 +324,16 @@ if (DATA.instrLinesAll) {
   }
 }
 
+// Instrumented lines of one source (program): the files it instrumented,
+// each with all of its instrumented lines. Without DATA.sources the report
+// has a single source made of every file.
+const sourceInstrLineSets = (DATA.sources || [null]).map(files => {
+  if (!files) return instrLineSetsAll;
+  const sets = {};
+  files.forEach(fi => { if (instrLineSetsAll[fi]) sets[fi] = instrLineSetsAll[fi]; });
+  return sets;
+});
+
 const instrLineSetsScoped = {};
 if (DATA.instrLinesScoped) {
   for (const [fi, lines] of Object.entries(DATA.instrLinesScoped)) {
@@ -580,20 +590,30 @@ function getInstrLineSets() {
   return state.coverageMode === 'all' ? instrLineSetsAll : getSelectedInstrLineSets();
 }
 
-// A passedBlocksOnly report records only the lines each test passed, so a
-// test carries no instrumented-line set of its own. The denominator is then
-// derived here from all instrumented lines.
-function getSelectedInstrLineSets() {
-  if (DATA.passedBlocksOnly) {
-    return state.selectedTests.size > 0 ? instrLineSetsAll : {};
+// The lines a test could have passed. A test that records them (t.i) uses
+// its own set; a passedBlocksOnly test records only the lines it passed, so
+// its denominator is derived from all instrumented lines of its source.
+function testInstrLineSets(t) {
+  if (t.i) {
+    const sets = {};
+    for (const [fi, lines] of Object.entries(t.i)) sets[fi] = new Set(lines);
+    return sets;
   }
+  return sourceInstrLineSets[t.s || 0] || {};
+}
+
+function mergeInstrLineSets(merged, sets) {
+  for (const [fi, lineSet] of Object.entries(sets)) {
+    if (!merged[fi]) merged[fi] = new Set();
+    lineSet.forEach(l => merged[fi].add(l));
+  }
+}
+
+function getSelectedInstrLineSets() {
   const merged = {};
   DATA.tests.forEach(t => {
-    if (!state.selectedTests.has(t.n) || !t.i) return;
-    for (const [fi, lines] of Object.entries(t.i)) {
-      if (!merged[fi]) merged[fi] = new Set();
-      lines.forEach(l => merged[fi].add(l));
-    }
+    if (!state.selectedTests.has(t.n)) return;
+    mergeInstrLineSets(merged, testInstrLineSets(t));
   });
   return merged;
 }
@@ -635,15 +655,10 @@ function buildDiffList(testA, testB) {
 }
 
 function getTestGroupInstrLines(testA, testB) {
-  if (DATA.passedBlocksOnly) return instrLineSetsAll;
   const merged = {};
   DATA.tests.forEach(t => {
-    if (!t.i) return;
     if (t.n !== testA && !t.n.startsWith(testA + '/') && t.n !== testB && !t.n.startsWith(testB + '/')) return;
-    for (const [fi, lines] of Object.entries(t.i)) {
-      if (!merged[fi]) merged[fi] = new Set();
-      lines.forEach(l => merged[fi].add(l));
-    }
+    mergeInstrLineSets(merged, testInstrLineSets(t));
   });
   return merged;
 }
@@ -1058,20 +1073,11 @@ function renderSummary() {
   const testBody = document.querySelector('#test-coverage-table tbody');
   testBody.innerHTML = '';
   const topLevelMap = {};
-  let allInstrKeys = null;
-  if (DATA.passedBlocksOnly) {
-    allInstrKeys = new Set();
-    for (const [fi, instrSet] of Object.entries(instrLineSetsAll)) {
-      instrSet.forEach(l => allInstrKeys.add(fi + ':' + l));
-    }
-  }
   DATA.tests.forEach(t => {
     const topName = t.n.split('/')[0];
-    if (!topLevelMap[topName]) topLevelMap[topName] = { covered: new Set(), instr: allInstrKeys || new Set() };
-    if (t.i) {
-      for (const [fi, lines] of Object.entries(t.i)) {
-        lines.forEach(l => topLevelMap[topName].instr.add(fi + ':' + l));
-      }
+    if (!topLevelMap[topName]) topLevelMap[topName] = { covered: new Set(), instr: new Set() };
+    for (const [fi, lineSet] of Object.entries(testInstrLineSets(t))) {
+      lineSet.forEach(l => topLevelMap[topName].instr.add(fi + ':' + l));
     }
     if (t.c) {
       for (const [fi, lines] of Object.entries(t.c)) {

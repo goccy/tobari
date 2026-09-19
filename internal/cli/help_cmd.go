@@ -31,7 +31,8 @@ Flags Command Options:
     -passed-blocks-only Record only the blocks that were actually passed. Blocks
                         that were not passed are omitted from scoped results, so
                         deriving "places that should be passed" is left to the
-                        consumer (e.g. from metadata.all in tobari.json).
+                        consumer (e.g. from the instrumented blocks of the
+                        test's program in tobari.json).
                         Cannot be combined with -exclude-analysis.
 
 HTML Command Options:
