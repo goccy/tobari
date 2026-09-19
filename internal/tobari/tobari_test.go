@@ -145,7 +145,7 @@ func TestCoverprofileMapPassedBlocksOnly(t *testing.T) {
 	got := entry.CoverprofileMap()
 	passed := blockID(testFileName, 0)
 	if len(got) != 1 || got[passed] == nil {
-		t.Fatalf("expected only the passed block %s, got %d entries", passed, len(got))
+		t.Fatalf("expected only the passed block %v, got %d entries", passed, len(got))
 	}
 	if got[passed].Count != 1 {
 		t.Errorf("passed block count = %d, want 1", got[passed].Count)
