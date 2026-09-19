@@ -17,13 +17,19 @@ type tobarifmtData struct {
 	InstrLinesAll    map[int][]int           `json:"instrLinesAll"`    // fileIndex → all instrumented line numbers (from metadata.all)
 	InstrLinesScoped map[int][]int           `json:"instrLinesScoped"` // fileIndex → instrumented line numbers within CoverWithName scope
 	AllCoverage      map[int][]int           `json:"allCoverage"`      // fileIndex → covered line numbers from allcounts
+	// Sources mirrors metadata.sources of the report: per source, the file
+	// indices it instrumented. Absent when the report has a single source
+	// made of every file. A test without Instr takes the instrumented lines
+	// of its source's files as its denominator.
+	Sources [][]int `json:"sources,omitempty"`
 }
 
 // tobarifmtTest represents a test with line-level coverage (compact representation).
 type tobarifmtTest struct {
 	Name     string        `json:"n"`
 	Coverage map[int][]int `json:"c"` // fileIndex → sorted list of covered line numbers
-	Instr    map[int][]int `json:"i"` // fileIndex → sorted list of instrumented line numbers
+	Instr    map[int][]int `json:"i"` // fileIndex → sorted list of instrumented line numbers (nil for a passedBlocksOnly test)
+	Source   int           `json:"s,omitempty"`
 }
 
 // tobarifmtFile represents a source file with its content.
@@ -358,25 +364,33 @@ func buildTobarifmtData(report *tobari.CoverReport, entriesMap map[string][]toba
 	}
 	sort.Strings(testNames)
 
+	// Per-test flags come from the counts; like expandCoverReport, the last
+	// count of a name wins when a merged report repeats one.
+	countByName := make(map[string]*tobari.CoverReportCount, len(report.Counts))
+	for _, c := range report.Counts {
+		countByName[c.Name] = c
+	}
+
 	tests := make([]*tobarifmtTest, 0, len(testNames))
+	// Entries of the tests that record the lines that could have been passed;
+	// only those define the CoverWithName scope.
+	scopedEntriesMap := make(map[string][]tobariJSONEntry, len(entriesMap))
 	for _, name := range testNames {
 		entries := entriesMap[name]
 		cov := convertToLineCoverage(entries, fileIndexMap)
-		instr := convertToLineInstrumented(entries, fileIndexMap)
+		test := &tobarifmtTest{Name: name}
 		// Only include non-empty coverage
 		if len(cov) > 0 {
-			tests = append(tests, &tobarifmtTest{
-				Name:     name,
-				Coverage: cov,
-				Instr:    instr,
-			})
-		} else {
-			tests = append(tests, &tobarifmtTest{
-				Name:     name,
-				Coverage: nil,
-				Instr:    instr,
-			})
+			test.Coverage = cov
 		}
+		if c := countByName[name]; c != nil {
+			test.Source = c.Source
+			if !c.PassedBlocksOnly {
+				test.Instr = convertToLineInstrumented(entries, fileIndexMap)
+				scopedEntriesMap[name] = entries
+			}
+		}
+		tests = append(tests, test)
 	}
 
 	// Build test tree
@@ -398,7 +412,7 @@ func buildTobarifmtData(report *tobari.CoverReport, entriesMap map[string][]toba
 	}
 
 	// Compute instrumented lines within CoverWithName scope
-	scopedInstrLines := collectScopedCoverageLines(entriesMap, fileIndexMap)
+	scopedInstrLines := collectScopedCoverageLines(scopedEntriesMap, fileIndexMap)
 	instrLinesScoped := make(map[int][]int, len(scopedInstrLines))
 	for fi, lineSet := range scopedInstrLines {
 		sorted := make([]int, 0, len(lineSet))
@@ -420,6 +434,7 @@ func buildTobarifmtData(report *tobari.CoverReport, entriesMap map[string][]toba
 		InstrLinesAll:    instrLinesAll,
 		InstrLinesScoped: instrLinesScoped,
 		AllCoverage:      allCoverage,
+		Sources:          report.Metadata.Sources,
 	}
 }
 

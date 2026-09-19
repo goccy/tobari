@@ -201,7 +201,9 @@ func (e *TraceEntry) CoverprofileMap() map[string]*CoverEntry {
 		if block == nil {
 			continue
 		}
-		resolveCandidateFuncMap(block.Function, hitCandidateFuncMap)
+		if !passedBlocksOnly {
+			resolveCandidateFuncMap(block.Function, hitCandidateFuncMap)
+		}
 		newCoverprofileMap[bid] = &CoverEntry{
 			FileName:  block.FileName,
 			StartLine: block.Start.Line,
@@ -229,6 +231,15 @@ func (e *TraceEntry) CoverprofileMap() map[string]*CoverEntry {
 		}
 	}
 	return newCoverprofileMap
+}
+
+// PassedBlocksOnly reports whether scoped results hold only the blocks that
+// were actually passed. When true, blocks that could have been passed but were
+// not are absent from every scoped result, and deriving "places that should be
+// passed" is left to the consumer (for example from all instrumented blocks).
+func PassedBlocksOnly() bool {
+	decodeRawMetas()
+	return passedBlocksOnly
 }
 
 func resolveCandidateFuncMap(fn *Function, fnMap map[*Function]struct{}) {
@@ -328,6 +339,9 @@ var (
 	rawMetasOnce           sync.Once
 	pendingSuppDeps        map[string][]string
 	pendingSuppDepsMu      sync.Mutex
+	// passedBlocksOnly is decided once by decodeRawMetas and immutable
+	// afterwards, so readers that went through decodeRawMetas need no lock.
+	passedBlocksOnly bool
 )
 
 type chanLinks struct {
@@ -503,6 +517,13 @@ type Metadata struct {
 	PkgName    string
 	ModulePath string
 	Funcs      []*Function
+	// PassedBlocksOnly is set when the package was instrumented with
+	// --passed-blocks-only. It travels with the instrumented packages rather
+	// than with the main hook because the option is part of the cover tool's
+	// build cache identity: every instrumented package linked into a binary
+	// was produced under the same setting, whereas a main package that is not
+	// itself instrumented would keep a stale hook across a toggle.
+	PassedBlocksOnly bool `json:"PassedBlocksOnly,omitempty"`
 }
 
 type Function struct {
@@ -640,6 +661,10 @@ func decodeRawMetas() {
 			mdMu.Lock()
 			mds = append(mds, &md)
 			mdMu.Unlock()
+
+			if md.PassedBlocksOnly {
+				passedBlocksOnly = true
+			}
 		}
 
 		// Apply pending supplementary deps now that funcMap is populated.
@@ -713,6 +738,7 @@ type CoverReportData struct {
 	Files     []string
 	Entry     []string
 	All       [][]int
+	Sources   [][]int
 	Counts    []CoverReportCountData
 	AllCounts []int
 }
@@ -721,6 +747,12 @@ type CoverReportData struct {
 type CoverReportCountData struct {
 	Name         string
 	Coverprofile [][]int
+	// PassedBlocksOnly states that Coverprofile holds only the blocks that
+	// were actually passed; see PassedBlocksOnly.
+	PassedBlocksOnly bool
+	// Source is the index of the program that produced this count. Data
+	// collected from a running binary always has a single source, 0.
+	Source int
 }
 
 // CollectCoverReportData builds compact coverage data from the current
@@ -826,8 +858,9 @@ func CollectCoverReportData() *CoverReportData {
 			profile = append(profile, []int{idx, e.Count})
 		}
 		counts = append(counts, CoverReportCountData{
-			Name:         name,
-			Coverprofile: profile,
+			Name:             name,
+			Coverprofile:     profile,
+			PassedBlocksOnly: passedBlocksOnly,
 		})
 	}
 
@@ -845,13 +878,16 @@ func CollectCoverReportData() *CoverReportData {
 func MarshalCoverJSON() ([]byte, error) {
 	data := CollectCoverReportData()
 	type jsonMetadata struct {
-		Files []string `json:"files"`
-		Entry []string `json:"entry"`
-		All   [][]int  `json:"all"`
+		Files   []string `json:"files"`
+		Entry   []string `json:"entry"`
+		All     [][]int  `json:"all"`
+		Sources [][]int  `json:"sources,omitempty"`
 	}
 	type jsonCount struct {
-		Name         string  `json:"name"`
-		Coverprofile [][]int `json:"coverprofile"`
+		Name             string  `json:"name"`
+		Coverprofile     [][]int `json:"coverprofile"`
+		PassedBlocksOnly bool    `json:"passedBlocksOnly,omitempty"`
+		Source           int     `json:"source,omitempty"`
 	}
 	type jsonReport struct {
 		Metadata  jsonMetadata `json:"metadata"`
@@ -864,9 +900,10 @@ func MarshalCoverJSON() ([]byte, error) {
 	}
 	return json.Marshal(jsonReport{
 		Metadata: jsonMetadata{
-			Files: data.Files,
-			Entry: data.Entry,
-			All:   data.All,
+			Files:   data.Files,
+			Entry:   data.Entry,
+			All:     data.All,
+			Sources: data.Sources,
 		},
 		Counts:    counts,
 		AllCounts: data.AllCounts,
@@ -900,6 +937,19 @@ func MarshalReportDataTOON(data *CoverReportData) ([]byte, error) {
 			fileName = data.Files[fileIdx]
 		}
 		fmt.Fprintf(&buf, "    %s,%d,%d,%d,%d,%d\n", fileName, block[1], block[2], block[3], block[4], block[5])
+	}
+	// sources section: only a merged report of several programs has one.
+	if len(data.Sources) != 0 {
+		fmt.Fprintf(&buf, "  sources[%d]{Source,Files}:\n", len(data.Sources))
+		for i, files := range data.Sources {
+			names := make([]string, 0, len(files))
+			for _, fileIdx := range files {
+				if fileIdx >= 0 && fileIdx < len(data.Files) {
+					names = append(names, data.Files[fileIdx])
+				}
+			}
+			fmt.Fprintf(&buf, "    %d,%s\n", i, strings.Join(names, ","))
+		}
 	}
 
 	// counts section
@@ -937,6 +987,30 @@ func MarshalReportDataTOON(data *CoverReportData) ([]byte, error) {
 				fileName = data.Files[fileIdx]
 			}
 			fmt.Fprintf(&buf, "    %s,%d,%d,%d,%d,%d,%d\n", fileName, block[1], block[2], block[3], block[4], block[5], count)
+		}
+	}
+
+	// passedBlocksOnly section: the tests whose entries hold only the blocks
+	// that were passed. Absent when there is none.
+	var passedBlocksOnlyNames []string
+	for _, name := range names {
+		if countsByName[name].PassedBlocksOnly {
+			passedBlocksOnlyNames = append(passedBlocksOnlyNames, name)
+		}
+	}
+	if len(passedBlocksOnlyNames) != 0 {
+		fmt.Fprintf(&buf, "passedBlocksOnly[%d]:\n", len(passedBlocksOnlyNames))
+		for _, name := range passedBlocksOnlyNames {
+			fmt.Fprintf(&buf, "  %s\n", name)
+		}
+	}
+
+	// source section: which program each test belongs to. Absent unless the
+	// report has several sources.
+	if len(data.Sources) != 0 {
+		fmt.Fprintf(&buf, "source[%d]{Name,Source}:\n", len(names))
+		for _, name := range names {
+			fmt.Fprintf(&buf, "  %s,%d\n", name, countsByName[name].Source)
 		}
 	}
 	return buf.Bytes(), nil

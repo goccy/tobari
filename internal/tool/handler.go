@@ -39,7 +39,7 @@ func Handle(ctx context.Context, args []string, opts BuildOpts) error {
 			return err
 		}
 	case "cover":
-		if err := handleCover(ctx, toolPath, toolArgs, opts.EmbedCode, opts.ExcludeAnalysis); err != nil {
+		if err := handleCover(ctx, toolPath, toolArgs, opts); err != nil {
 			return err
 		}
 	default:
@@ -99,6 +99,15 @@ func handleVersionFull(ctx context.Context, toolPath string, args []string, opts
 	// the hit/miss decision. The identity probe is the only pre-action input.
 	if filepath.Base(toolPath) == "cover" && len(opts.ExcludeAnalysis) != 0 {
 		ident += " exclude-analysis:" + hashStrings(opts.ExcludeAnalysis)
+	}
+
+	// --passed-blocks-only follows the same reasoning. It changes the metadata
+	// the cover tool embeds into every instrumented package (and skips writing
+	// suppDeps), and nothing else, so it belongs to the cover tool's identity
+	// alone. The marker is appended only when the option is set so that builds
+	// without it keep their existing cache keys.
+	if filepath.Base(toolPath) == "cover" && opts.PassedBlocksOnly {
+		ident += " passed-blocks-only"
 	}
 
 	fmt.Printf("%s tobari:[%s]\n", strings.TrimSpace(string(org)), ident)

@@ -1083,22 +1083,31 @@ func TestExcludeAnalysisIgnoresCoverTargets(t *testing.T) {
 // excludeAnalysis is non-empty it is passed via --exclude-analysis.
 func buildCrosspkgSuppDeps(t *testing.T, ctx context.Context, tobariBin, excludeAnalysis string) string {
 	t.Helper()
-	if err := os.RemoveAll(coverPkgsDir()); err != nil {
-		t.Fatalf("failed to clear cover pkg cache: %v", err)
-	}
 	toolexec := tobariBin
 	if excludeAnalysis != "" {
 		toolexec += " --exclude-analysis=" + excludeAnalysis
 	}
+	return extractSuppDeps(t, buildCrosspkg(t, ctx, toolexec))
+}
+
+// buildCrosspkg builds testdata/crosspkg with the given toolexec value under a
+// fresh Go build cache and cover-package cache, and returns the binary path.
+//
+// The cover-package cache lives under the OS temp dir and is shared by every
+// tobari build on the machine, so the build gets a private TMPDIR instead of
+// having the shared cache cleared: clearing it would race with any other
+// tobari build running at the same time, in either direction.
+func buildCrosspkg(t *testing.T, ctx context.Context, toolexec string) string {
+	t.Helper()
 	bin := filepath.Join(t.TempDir(), "app")
 	cmd := exec.CommandContext(ctx, "go", "build",
 		"-cover", "-toolexec="+toolexec, "-o", bin, ".")
 	cmd.Dir = "testdata/crosspkg"
-	cmd.Env = append(os.Environ(), "GOCACHE="+t.TempDir())
+	cmd.Env = append(os.Environ(), "GOCACHE="+t.TempDir(), "TMPDIR="+t.TempDir())
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build failed: %s: %v", string(out), err)
 	}
-	return extractSuppDeps(t, bin)
+	return bin
 }
 
 // coverPkgsDir mirrors utils.CoverPkgsDir, which is in an internal package.
@@ -1110,6 +1119,17 @@ func coverPkgsDir() string {
 // binary. The cover tool serializes the map and the compile tool bakes it in as
 // a string literal, so it appears verbatim in the binary's data section.
 func extractSuppDeps(t *testing.T, binPath string) string {
+	t.Helper()
+	suppDeps, found := findSuppDeps(t, binPath)
+	if !found {
+		t.Fatal("suppDeps not found in binary")
+	}
+	return suppDeps
+}
+
+// findSuppDeps is extractSuppDeps for callers that expect the suppDeps to be
+// possibly absent.
+func findSuppDeps(t *testing.T, binPath string) (string, bool) {
 	t.Helper()
 	data, err := os.ReadFile(binPath)
 	if err != nil {
@@ -1133,10 +1153,9 @@ func extractSuppDeps(t *testing.T, binPath string) string {
 		if err := json.Unmarshal(candidate, &m); err != nil {
 			continue // a nested object; keep scanning
 		}
-		return string(candidate)
+		return string(candidate), true
 	}
-	t.Fatal("suppDeps not found in binary")
-	return ""
+	return "", false
 }
 
 // TestCoverageRuntimeRaceClean verifies that the coverage runtime injected into
@@ -1278,4 +1297,169 @@ func TestGreeting(t *testing.T) {
 	// Relink the pinned app from the warm build cache: the link phase must
 	// find the pinned tobari packages again.
 	run(appDir, "test", "-count=1", ".")
+}
+
+// TestPassedBlocksOnly verifies the --passed-blocks-only contract on a real
+// build: every count states passedBlocksOnly, every scoped entry is a block
+// that was actually passed, and nothing else about the report changes.
+//
+// The expectation is derived from a default build of the same tests rather
+// than from a golden file: a passed-blocks-only report must equal the default
+// report with its zero-count entries removed.
+//
+// The three runs share one Go build cache and alternate the option, so they
+// also verify that toggling it never serves instrumented packages that were
+// built under the other setting.
+func TestPassedBlocksOnly(t *testing.T) {
+	ctx := t.Context()
+	tobariBin := filepath.Join(t.TempDir(), "tobari")
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+
+	const runDir = "testdata/crosspkg"
+	// The runs share a Go build cache and a private TMPDIR. The latter keeps
+	// tobari's machine-wide caches (see buildCrosspkg) out of the picture while
+	// still persisting them across the runs, as they would for a real user.
+	goCache := t.TempDir()
+	tmpDir := t.TempDir()
+
+	runReport := func(t *testing.T, flagsArgs ...string) *tobari.CoverReport {
+		t.Helper()
+		flagsCmd := exec.CommandContext(ctx, tobariBin, append([]string{"flags"}, flagsArgs...)...)
+		flagsCmd.Dir = runDir
+		flagsOut, err := flagsCmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("tobari flags failed: %s: %v", string(flagsOut), err)
+		}
+		coverDir := t.TempDir()
+		cmd := exec.CommandContext(ctx, "go", "test", ".", "-count=1", "-coverpkg=example.com/...")
+		cmd.Dir = runDir
+		cmd.Env = append(os.Environ(),
+			"GOFLAGS="+strings.TrimSpace(string(flagsOut)),
+			"GOCACHE="+goCache,
+			"TMPDIR="+tmpDir,
+			"TOBARI_COVERDIR="+coverDir,
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("go test failed: %s: %v", string(out), err)
+		}
+		data, err := os.ReadFile(filepath.Join(coverDir, "tobari", "tobari.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var report tobari.CoverReport
+		if err := json.Unmarshal(data, &report); err != nil {
+			t.Fatal(err)
+		}
+		return &report
+	}
+
+	checkPassedOnly := func(t *testing.T, got, base *tobari.CoverReport) {
+		t.Helper()
+		want := &tobari.CoverReport{
+			Metadata:  base.Metadata,
+			AllCounts: base.AllCounts,
+		}
+		for _, c := range base.Counts {
+			passed := make([][]int, 0, len(c.Coverprofile))
+			for _, cp := range c.Coverprofile {
+				if cp[1] > 0 {
+					passed = append(passed, cp)
+				}
+			}
+			want.Counts = append(want.Counts, &tobari.CoverReportCount{Name: c.Name, Coverprofile: passed, PassedBlocksOnly: true})
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("passed-blocks-only report mismatch (-want +got):\n%s", diff)
+		}
+	}
+
+	first := runReport(t, "-passed-blocks-only")
+
+	base := runReport(t)
+	var zeroCounts int
+	for _, c := range base.Counts {
+		if c.PassedBlocksOnly {
+			t.Fatalf("count %q must not state passedBlocksOnly without the option", c.Name)
+		}
+		for _, cp := range c.Coverprofile {
+			if cp[1] == 0 {
+				zeroCounts++
+			}
+		}
+	}
+	if zeroCounts == 0 {
+		t.Fatal("the default report has no zero-count entries, so this test cannot tell the two modes apart")
+	}
+
+	checkPassedOnly(t, first, base)
+	checkPassedOnly(t, runReport(t, "-passed-blocks-only"), base)
+}
+
+// TestPassedBlocksOnlyEmbedsNoSuppDeps verifies that a passed-blocks-only
+// binary carries no dependency map: "places that should be passed" are never
+// reported, so nothing may be computed or embedded for them.
+func TestPassedBlocksOnlyEmbedsNoSuppDeps(t *testing.T) {
+	ctx := t.Context()
+	tobariBin := filepath.Join(t.TempDir(), "tobari")
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+	if _, found := findSuppDeps(t, buildCrosspkg(t, ctx, tobariBin)); !found {
+		t.Fatal("a default build must embed suppDeps, otherwise this test proves nothing")
+	}
+	if suppDeps, found := findSuppDeps(t, buildCrosspkg(t, ctx, tobariBin+" --passed-blocks-only")); found {
+		t.Fatalf("a passed-blocks-only build must not embed suppDeps, got: %s", suppDeps)
+	}
+}
+
+func TestPassedBlocksOnlyRejectsExcludeAnalysis(t *testing.T) {
+	ctx := t.Context()
+	tobariBin := filepath.Join(t.TempDir(), "tobari")
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build tobari: %s: %v", string(out), err)
+	}
+	if out, err := exec.CommandContext(ctx, tobariBin, "flags", "-passed-blocks-only", "-exclude-analysis=example.com/x").CombinedOutput(); err == nil {
+		t.Fatalf("tobari flags must reject the combination, got: %s", string(out))
+	}
+	cmd := exec.CommandContext(ctx, "go", "build", "-cover",
+		"-toolexec="+tobariBin+" --passed-blocks-only --exclude-analysis=example.com/x",
+		"-o", filepath.Join(t.TempDir(), "app"), ".")
+	cmd.Dir = "testdata/crosspkg"
+	cmd.Env = append(os.Environ(), "GOCACHE="+t.TempDir())
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("toolexec must reject the combination, got: %s", string(out))
+	}
+}
+
+// A tobari.json written before sources and per-count flags existed carries
+// neither field; it must read as one program made of every file whose counts
+// record the blocks that could have been passed.
+func TestCoverReportDefaultsForOlderJSON(t *testing.T) {
+	var report tobari.CoverReport
+	if err := json.Unmarshal([]byte(`{
+		"metadata": {"files": ["/src/a.go", "/src/b.go"], "entry": [], "all": [[0, 1, 1, 2, 2, 1], [1, 1, 1, 2, 2, 1]]},
+		"counts": [{"name": "TestA", "coverprofile": [[0, 1], [1, 0]]}],
+		"allcounts": [1, 0]
+	}`), &report); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := report.SourceFiles(0), []int{0, 1}; !cmp.Equal(got, want) {
+		t.Errorf("SourceFiles(0) = %v, want %v", got, want)
+	}
+	if report.SourceFiles(1) != nil {
+		t.Errorf("SourceFiles(1) = %v, want nil", report.SourceFiles(1))
+	}
+	c := report.Counts[0]
+	if c.PassedBlocksOnly || c.Source != 0 {
+		t.Errorf("count = %+v, want passedBlocksOnly=false source=0", c)
+	}
+	merged, err := tobari.MergeCoverReports([]*tobari.CoverReport{&report, &report})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Metadata.Sources != nil {
+		t.Errorf("merging one program with itself must keep the implicit source, got %v", merged.Metadata.Sources)
+	}
 }

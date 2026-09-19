@@ -28,6 +28,12 @@ Flags Command Options:
                         Comma-separated package path prefixes to exclude from the
                         whole-program dependency analysis. Only exclude packages
                         that never call back into coverage-target code.
+    -passed-blocks-only Record only the blocks that were actually passed. Blocks
+                        that were not passed are omitted from scoped results, so
+                        deriving "places that should be passed" is left to the
+                        consumer (e.g. from the instrumented blocks of the
+                        test's program in tobari.json).
+                        Cannot be combined with -exclude-analysis.
 
 HTML Command Options:
     -o <file>           Output HTML file path (default: cover.html)
@@ -56,6 +62,8 @@ Toolexec Options (used with -toolexec):
     --exclude-analysis=PKGS
                         Comma-separated package path prefixes to exclude from the
                         whole-program dependency analysis
+    --passed-blocks-only
+                        Record only the blocks that were actually passed
 
 Examples:
     # Get flags for go build

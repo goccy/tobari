@@ -26,6 +26,9 @@ func tobariToolexec(opts BuildOpts) (string, error) {
 	if len(opts.ExcludeAnalysis) != 0 {
 		v += " --exclude-analysis=" + strings.Join(opts.ExcludeAnalysis, ",")
 	}
+	if opts.PassedBlocksOnly {
+		v += " --passed-blocks-only"
+	}
 	return v, nil
 }
 

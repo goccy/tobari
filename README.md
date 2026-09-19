@@ -177,6 +177,77 @@ they are what the analysis exists to measure. Naming one is silently ignored.
 > build cache key for coverage-instrumented packages only, so toggling it
 > rebuilds those without invalidating the rest of the dependency closure.
 
+### Recording Only the Passed Blocks
+
+By default, a scoped result contains both terms of the Scoped Coverage formula:
+the *places passed*, and the *places that should be passed* (reported as blocks
+with a zero count). With `--passed-blocks-only`, tobari records only the blocks
+that were actually passed and leaves deriving the places that should be passed
+to whoever consumes the result:
+
+```console
+GOFLAGS="$(tobari flags -passed-blocks-only)" go build .
+```
+
+What changes:
+
+- Every result scoped by `Cover` / `CoverWithName` — `WriteCoverprofile`,
+  `WriteCoverprofileByName`, `CoverprofileByName`, `CoverprofileMap`,
+  `CollectCoverReport`, and the `tobari.json` / `tobari.toon` written by
+  `go test` — contains only blocks with a count greater than zero. A block that
+  is absent was not passed; whether it *should* have been passed is not stated.
+- The result says so explicitly: every entry of `counts` in `tobari.json`
+  carries `"passedBlocksOnly": true`, `CoverReportCount` and `Coverprofile` have
+  a `PassedBlocksOnly` field, and `tobari.PassedBlocksOnly()` reports it at
+  runtime. Consumers should check this flag instead of assuming that zero-count
+  blocks are present. It is a property of each test's entries rather than of the
+  whole file because `tobari merge json` can combine reports built with and
+  without the option.
+- Which goroutines are counted does not change. Only blocks passed inside the
+  `Cover` / `CoverWithName` scope are recorded, exactly as without the option.
+- `WriteAllCoverprofile`, `metadata.all`, `allcounts`, and the `coverage: N%`
+  line and `-coverprofile` output of `go test` do not change. They describe all
+  instrumented blocks, which makes them a natural source for a denominator.
+
+Because the places that should be passed are no longer reported, tobari has no
+use for the whole-program dependency analysis that computes them and does not
+run it, so builds are faster. For the same reason `--exclude-analysis` cannot be
+combined with this option.
+
+> **Note**: the coverprofile text format has no place to carry the flag. A
+> profile written by `WriteCoverprofile` or `WriteCoverprofileByName` in this
+> mode lists only passed blocks, so `go tool cover` on that file alone reports
+> 100%. Combine it with `WriteAllCoverprofile` to get a meaningful percentage.
+
+`tobari html` uses all instrumented blocks of the program that ran the test as
+the denominator of such a test. Toggling the option rebuilds
+coverage-instrumented packages only, like `--exclude-analysis`.
+
+#### Merging reports of several programs
+
+`tobari merge json` keeps track of which program each test came from, so that
+"all instrumented blocks" keeps its meaning for a `passedBlocksOnly` test after
+a merge. When the merged reports come from programs with different file sets,
+the merged `metadata` gains a `sources` list, one entry per program holding the
+indices into `files` of the files it instrumented, and every entry of `counts`
+gains a `source` index into that list:
+
+```json
+"metadata": {"files": ["/svc1/main.go", "/svc2/main.go"], "all": [...], "sources": [[0], [1]]},
+"counts": [
+  {"name": "TestS1", "passedBlocksOnly": true, "coverprofile": [[0, 3]]},
+  {"name": "TestS2", "source": 1, "coverprofile": [[1, 3], [2, 0]]}
+]
+```
+
+Both fields are omitted when they hold their default: a report written by a
+running binary, or merged from reports of a single program, has one source
+consisting of every file, and every test belongs to source `0`. Programs are
+identified by their file set, so merging a report into a merged report again
+does not add sources. `CoverReport.SourceFiles` applies this rule for Go
+consumers. A `tobari.json` written before these fields existed reads exactly
+as before.
+
 ### Embedding Source Code
 
 Tobari supports embedding the original source code into instrumented binaries with the `--embed-code` (`-E`) option. This is useful for archiving the exact source that was compiled, enabling offline coverage analysis without access to the original source tree.

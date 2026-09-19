@@ -43,6 +43,10 @@ TestName[N]{FileName,StartLine,StartCol,EndLine,EndCol,StatementCount,Count}:
   - StatementCount: number of statements in this block
   - Count: execution count (0 = not covered)
 
+### Reports with `passedBlocksOnly`
+
+If tobari.toon ends with a `passedBlocksOnly[N]:` section, the tests listed there come from a binary built with `--passed-blocks-only`: their per-test lists hold only blocks that were actually passed, so **none of their entries has Count = 0**. Do not conclude that everything is covered. Derive the full set of blocks from the `all[N]:` list in the `metadata:` section instead (each line is `FileName,StartLine,StartCol,EndLine,EndCol,StatementCount`), and treat a block of `all` that appears in no test as not covered. If the `metadata:` section also has a `sources[N]{Source,Files}:` list and the file ends with a `source[N]{Name,Source}:` section, the report merges several programs: restrict `all` to the files of the test's own source.
+
 ## Detect Duplicate Test Cases
 
 Compare coverage entries between all test cases to find tests that cover nearly identical code paths.

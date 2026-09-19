@@ -27,7 +27,20 @@ import (
 	"github.com/goccy/tobari/internal/utils"
 )
 
-func Run(ctx context.Context, args []string, embedCode bool, excludeAnalysis []string) error {
+// Options are the tobari toolexec settings that affect instrumentation.
+type Options struct {
+	EmbedCode bool
+	// ExcludeAnalysis lists package-path prefixes to omit from the
+	// whole-program dependency analysis. See CreateMainDeps.
+	ExcludeAnalysis []string
+	// PassedBlocksOnly makes the instrumented binary record only the blocks
+	// that were actually passed. The binary then never reports "places that
+	// should be passed", which is the only thing the whole-program dependency
+	// analysis exists to compute, so the analysis is not run at all.
+	PassedBlocksOnly bool
+}
+
+func Run(ctx context.Context, args []string, opts Options) error {
 	inputFiles, opt, err := parseOption(args)
 	if err != nil {
 		return err
@@ -64,7 +77,7 @@ func Run(ctx context.Context, args []string, embedCode bool, excludeAnalysis []s
 	}
 
 	// Only embed code when embedCode is enabled, not in testmain mode, and pkgcfg is available
-	shouldEmbed := embedCode && opt.mode != "testmain" && opt.pkgcfg != ""
+	shouldEmbed := opts.EmbedCode && opt.mode != "testmain" && opt.pkgcfg != ""
 
 	var depMap *FunctionDependency
 
@@ -75,8 +88,10 @@ func Run(ctx context.Context, args []string, embedCode bool, excludeAnalysis []s
 		// Write suppDeps to the $WORK/bNNN/ directory alongside _testmain.go.
 		// This prevents races when go test ./... builds multiple packages in
 		// parallel, as each package gets its own isolated file.
-		if err := createAndWriteSuppDeps(nil, true, pkgcfg, filepath.Dir(inputFiles[0]), excludeAnalysis); err != nil {
-			return err
+		if !opts.PassedBlocksOnly {
+			if err := createAndWriteSuppDeps(nil, true, pkgcfg, filepath.Dir(inputFiles[0]), opts.ExcludeAnalysis); err != nil {
+				return err
+			}
 		}
 	} else if pkgcfg.PkgName == "main" {
 		// Perform whole-program SSA analysis for go run/go build.
@@ -90,7 +105,7 @@ func Run(ctx context.Context, args []string, embedCode bool, excludeAnalysis []s
 				break
 			}
 		}
-		if !hasTestFiles {
+		if !hasTestFiles && !opts.PassedBlocksOnly {
 			// Write suppDeps to the $WORK/bNNN/ directory (same as pkgcfg.txt)
 			// to prevent races when go build ./... builds multiple main packages
 			// in parallel. The compile tool finds the file via covervars.go which
@@ -99,7 +114,7 @@ func Run(ctx context.Context, args []string, embedCode bool, excludeAnalysis []s
 			if opt.pkgcfg != "" {
 				workDir = filepath.Dir(opt.pkgcfg)
 			}
-			if err := createAndWriteSuppDeps(inputFiles, false, nil, workDir, excludeAnalysis); err != nil {
+			if err := createAndWriteSuppDeps(inputFiles, false, nil, workDir, opts.ExcludeAnalysis); err != nil {
 				return err
 			}
 		}
@@ -122,7 +137,7 @@ func Run(ctx context.Context, args []string, embedCode bool, excludeAnalysis []s
 		}
 	}
 	if len(inputFiles) == 1 && opt.output != "" {
-		if err := annotateFile(pkgcfg, depMap, inputFiles[0], opt.output, opt.mode); err != nil {
+		if err := annotateFile(pkgcfg, depMap, inputFiles[0], opt.output, opt.mode, opts.PassedBlocksOnly); err != nil {
 			return err
 		}
 		outputFiles := []string{opt.output}
@@ -144,7 +159,7 @@ func Run(ctx context.Context, args []string, embedCode bool, excludeAnalysis []s
 			base = base[:len(base)-len(filepath.Ext(base))]
 		}
 		outputName := base + ".cover.go"
-		if err := annotateFile(pkgcfg, depMap, inputFile, outputName, opt.mode); err != nil {
+		if err := annotateFile(pkgcfg, depMap, inputFile, outputName, opt.mode, opts.PassedBlocksOnly); err != nil {
 			return err
 		}
 		outputFiles = append(outputFiles, outputName)
@@ -371,11 +386,11 @@ func writeOutputFileList(filename string, outputFiles []string) (e error) {
 	return nil
 }
 
-func annotateFile(pkgcfg *PackageConfig, dep *FunctionDependency, src, dst, mode string) error {
+func annotateFile(pkgcfg *PackageConfig, dep *FunctionDependency, src, dst, mode string, passedBlocksOnly bool) error {
 	if dst != "" {
-		return createFile(pkgcfg, dep, src, dst, mode)
+		return createFile(pkgcfg, dep, src, dst, mode, passedBlocksOnly)
 	}
-	b, err := addTracePoint(pkgcfg, dep, src, mode)
+	b, err := addTracePoint(pkgcfg, dep, src, mode, passedBlocksOnly)
 	if err != nil {
 		return err
 	}
@@ -385,8 +400,8 @@ func annotateFile(pkgcfg *PackageConfig, dep *FunctionDependency, src, dst, mode
 	return nil
 }
 
-func createFile(pkgcfg *PackageConfig, dep *FunctionDependency, src, dst, mode string) error {
-	converted, err := addTracePoint(pkgcfg, dep, src, mode)
+func createFile(pkgcfg *PackageConfig, dep *FunctionDependency, src, dst, mode string, passedBlocksOnly bool) error {
+	converted, err := addTracePoint(pkgcfg, dep, src, mode, passedBlocksOnly)
 	if err != nil {
 		return err
 	}
@@ -396,12 +411,12 @@ func createFile(pkgcfg *PackageConfig, dep *FunctionDependency, src, dst, mode s
 	return nil
 }
 
-func addTracePoint(pkgcfg *PackageConfig, dep *FunctionDependency, src, mode string) ([]byte, error) {
+func addTracePoint(pkgcfg *PackageConfig, dep *FunctionDependency, src, mode string, passedBlocksOnly bool) ([]byte, error) {
 	f, err := os.ReadFile(src)
 	if err != nil {
 		return nil, err
 	}
-	return addTracePointWithContent(pkgcfg, dep, src, f, mode)
+	return addTracePointWithContent(pkgcfg, dep, src, f, mode, passedBlocksOnly)
 }
 
 type File struct {
@@ -415,6 +430,7 @@ type File struct {
 	edit                *Buffer
 	funcDep             *FunctionDependency
 	pkgcfg              *PackageConfig
+	passedBlocksOnly    bool
 	anonymGlobalFuncIdx int
 	commClauseCommPos   map[token.Pos]struct{} // positions of CommClause.Comm send/recv to skip wrapping
 	selectInstrumented  map[token.Pos]struct{}
@@ -449,7 +465,7 @@ func (f *Function) addBlock(b *tobari.Block) {
 	f.blocks = append(f.blocks, b)
 }
 
-func addTracePointWithContent(pkgcfg *PackageConfig, dep *FunctionDependency, filename string, content []byte, mode string) ([]byte, error) {
+func addTracePointWithContent(pkgcfg *PackageConfig, dep *FunctionDependency, filename string, content []byte, mode string, passedBlocksOnly bool) ([]byte, error) {
 	var fset *token.FileSet
 	var parsedFile *ast.File
 
@@ -478,6 +494,7 @@ func addTracePointWithContent(pkgcfg *PackageConfig, dep *FunctionDependency, fi
 		astFile:             parsedFile,
 		funcDep:             dep,
 		pkgcfg:              pkgcfg,
+		passedBlocksOnly:    passedBlocksOnly,
 		anonymGlobalFuncIdx: 1,
 		commClauseCommPos:   collectCommClauseCommPos(parsedFile),
 		selectInstrumented:  make(map[token.Pos]struct{}),
@@ -530,11 +547,12 @@ func (f *File) renderMetadata() (string, error) {
 		})
 	}
 	encoded := tobari.MarshalMetadata(&tobari.Metadata{
-		FileName:   f.name,
-		PkgPath:    f.pkgcfg.PkgPath,
-		PkgName:    f.pkgcfg.PkgName,
-		ModulePath: f.pkgcfg.ModulePath,
-		Funcs:      funcs,
+		FileName:         f.name,
+		PkgPath:          f.pkgcfg.PkgPath,
+		PkgName:          f.pkgcfg.PkgName,
+		ModulePath:       f.pkgcfg.ModulePath,
+		Funcs:            funcs,
+		PassedBlocksOnly: f.passedBlocksOnly,
 	})
 	return encoded, nil
 }

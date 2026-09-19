@@ -1,6 +1,7 @@
 package tobari
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -124,5 +125,99 @@ func TestCoverprofileMapRepeatedCallsKeepDepRefsStable(t *testing.T) {
 		if afterLen := after[name]; afterLen != beforeLen {
 			t.Errorf("function %s: DepRefs grew from %d to %d across CoverprofileMap calls", name, beforeLen, afterLen)
 		}
+	}
+}
+
+// With passedBlocksOnly a scoped result holds exactly the blocks that were
+// passed: no block of a dependent function, and no other block of the passed
+// function, is added with a zero count. Without it the same trace expands
+// through the dependency graph.
+func TestCoverprofileMapPassedBlocksOnly(t *testing.T) {
+	entry := setupTestCoverMeta(t)
+
+	if got := len(entry.CoverprofileMap()); got <= 1 {
+		t.Fatalf("default mode must add the blocks that could have been passed, got %d entries", got)
+	}
+
+	passedBlocksOnly = true
+	t.Cleanup(func() { passedBlocksOnly = false })
+
+	got := entry.CoverprofileMap()
+	passed := blockID(testFileName, 0)
+	if len(got) != 1 || got[passed] == nil {
+		t.Fatalf("expected only the passed block %s, got %d entries", passed, len(got))
+	}
+	if got[passed].Count != 1 {
+		t.Errorf("passed block count = %d, want 1", got[passed].Count)
+	}
+}
+
+// Every count of the report must state passedBlocksOnly so that a consumer
+// knows zero-count blocks are absent rather than out of scope, and no count
+// may mention it otherwise, keeping default reports byte-identical.
+func TestMarshalCoverPassedBlocksOnly(t *testing.T) {
+	setupTestCoverMeta(t)
+	root := newTraceG(2)
+	root.addCounter(blockID(testFileName, 1))
+	setEntry("marshal-passed-blocks-only", &TraceEntry{Name: "marshal-passed-blocks-only", Roots: []*TraceG{root}})
+
+	type report struct {
+		Metadata map[string]json.RawMessage   `json:"metadata"`
+		Counts   []map[string]json.RawMessage `json:"counts"`
+	}
+	marshal := func(t *testing.T) report {
+		t.Helper()
+		b, err := MarshalCoverJSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var r report
+		if err := json.Unmarshal(b, &r); err != nil {
+			t.Fatal(err)
+		}
+		if len(r.Counts) == 0 {
+			t.Fatal("report has no counts")
+		}
+		return r
+	}
+
+	r := marshal(t)
+	for _, c := range r.Counts {
+		if v, exists := c["passedBlocksOnly"]; exists {
+			t.Fatalf("default report must not carry passedBlocksOnly, got %s", v)
+		}
+	}
+	if v, exists := r.Metadata["sources"]; exists {
+		t.Fatalf("a runtime report has a single implicit source, got sources=%s", v)
+	}
+
+	passedBlocksOnly = true
+	t.Cleanup(func() { passedBlocksOnly = false })
+
+	for _, c := range marshal(t).Counts {
+		if v := string(c["passedBlocksOnly"]); v != "true" {
+			t.Fatalf("counts[].passedBlocksOnly = %q, want true", v)
+		}
+	}
+	toon, err := MarshalCoverTOON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(toon, []byte("passedBlocksOnly[")) || !bytes.Contains(toon, []byte("\n  marshal-passed-blocks-only\n")) {
+		t.Errorf("TOON must list the passedBlocksOnly tests:\n%s", toon)
+	}
+}
+
+// decodeRawMetas takes the mode from the instrumented packages' metadata.
+func TestMetadataPassedBlocksOnlyRoundTrip(t *testing.T) {
+	var md Metadata
+	if err := json.Unmarshal([]byte(MarshalMetadata(&Metadata{FileName: "a.go", PassedBlocksOnly: true})), &md); err != nil {
+		t.Fatal(err)
+	}
+	if !md.PassedBlocksOnly {
+		t.Fatal("PassedBlocksOnly was lost in the metadata round trip")
+	}
+	if s := MarshalMetadata(&Metadata{FileName: "a.go"}); bytes.Contains([]byte(s), []byte("PassedBlocksOnly")) {
+		t.Fatalf("default metadata must stay unchanged, got %s", s)
 	}
 }
