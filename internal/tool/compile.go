@@ -278,7 +278,7 @@ func addMissingImportsToImportcfg(args []string, imports []string, toolexec stri
 	// Build new importcfg entries
 	var newEntries strings.Builder
 	for importPath, exportPath := range exportPaths {
-		newEntries.WriteString(fmt.Sprintf("packagefile %s=%s\n", importPath, exportPath))
+		fmt.Fprintf(&newEntries, "packagefile %s=%s\n", importPath, exportPath)
 	}
 
 	if newEntries.Len() == 0 {

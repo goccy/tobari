@@ -1,6 +1,6 @@
 module examples/std
 
-go 1.25.1
+go 1.26.0
 
 replace github.com/goccy/tobari => ../../
 

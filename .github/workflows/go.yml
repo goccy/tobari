@@ -16,7 +16,7 @@ jobs:
       - name: setup Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.25'
+          go-version: '1.27'
       - name: run linters
         run: |
           make lint
@@ -26,7 +26,7 @@ jobs:
     strategy:
       matrix:
         os: [ "ubuntu-latest", "macos-latest" ]
-        go-version: [ "1.24", "1.25" ]
+        go-version: [ "1.26", "1.27" ]
     runs-on: ${{ matrix.os }}
     steps:
     - name: checkout
@@ -48,7 +48,7 @@ jobs:
     - name: setup Go
       uses: actions/setup-go@v4
       with:
-        go-version: '1.25'
+        go-version: '1.27'
     - name: ko build
       run: |
         make kobuild
