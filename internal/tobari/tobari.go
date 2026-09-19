@@ -86,7 +86,7 @@ func WriteCoverprofile(mode string, w io.Writer) {
 	entryMapMu.RLock()
 	defer entryMapMu.RUnlock()
 
-	mergeMap := make(map[string]*CoverEntry)
+	mergeMap := make(map[blockKey]*CoverEntry)
 	for _, e := range entryMap {
 		for k, v := range e.CoverprofileMap() {
 			mergeMap[k] = v
@@ -114,12 +114,12 @@ func WriteAllCoverprofile(mode string, w io.Writer) {
 	gMapMu.RLock()
 	defer gMapMu.RUnlock()
 
-	blockToCountMap := make(map[string]int)
+	blockToCountMap := make(map[blockKey]int)
 	for _, g := range gMap {
 		g.blockToCountMap(blockToCountMap, make(map[uint64]struct{}))
 	}
 
-	newCoverprofileMap := make(map[string]*CoverEntry)
+	newCoverprofileMap := make(map[blockKey]*CoverEntry)
 	allCoverprofileMapMu.RLock()
 	maps.Copy(newCoverprofileMap, allCoverprofileMap)
 	allCoverprofileMapMu.RUnlock()
@@ -188,13 +188,13 @@ func (e *CoverEntry) String() string {
 	)
 }
 
-func (e *TraceEntry) CoverprofileMap() map[string]*CoverEntry {
-	blockToCountMap := make(map[string]int)
+func (e *TraceEntry) CoverprofileMap() map[blockKey]*CoverEntry {
+	blockToCountMap := make(map[blockKey]int)
 	for _, root := range e.Roots {
 		root.blockToCountMap(blockToCountMap, make(map[uint64]struct{}))
 	}
 
-	newCoverprofileMap := make(map[string]*CoverEntry)
+	newCoverprofileMap := make(map[blockKey]*CoverEntry)
 	hitCandidateFuncMap := make(map[*Function]struct{})
 	for bid, count := range blockToCountMap {
 		block := getBlock(bid)
@@ -270,7 +270,7 @@ func setEntry(id string, e *TraceEntry) {
 
 type TraceG struct {
 	ID              uint64
-	BlockCounterMap map[string]int
+	BlockCounterMap map[blockKey]int
 	Children        []*TraceG
 	mu              sync.RWMutex
 }
@@ -278,11 +278,11 @@ type TraceG struct {
 func newTraceG(gid uint64) *TraceG {
 	return &TraceG{
 		ID:              gid,
-		BlockCounterMap: make(map[string]int),
+		BlockCounterMap: make(map[blockKey]int),
 	}
 }
 
-func (g *TraceG) addCounter(blockID string) {
+func (g *TraceG) addCounter(blockID blockKey) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -296,7 +296,7 @@ func (g *TraceG) linkG(child *TraceG) {
 	g.Children = append(g.Children, child)
 }
 
-func (g *TraceG) blockToCountMap(blockToCountMap map[string]int, visited map[uint64]struct{}) {
+func (g *TraceG) blockToCountMap(blockToCountMap map[blockKey]int, visited map[uint64]struct{}) {
 	if _, ok := visited[g.ID]; ok {
 		return
 	}
@@ -322,15 +322,15 @@ var (
 	entryMapMu             sync.RWMutex
 	gMap                   map[uint64]*TraceG
 	gMapMu                 sync.RWMutex
-	blockMap               map[string]*Block
+	blockMap               map[blockKey]*Block
 	blockMapMu             sync.RWMutex
 	mdMu                   sync.RWMutex
 	mds                    []*Metadata
 	funcMap                map[string]*Function
 	funcNames              []string
 	funcMapMu              sync.RWMutex
-	allCoverprofileMap     map[string]*CoverEntry
-	allCoverprofileMapKeys []string
+	allCoverprofileMap     map[blockKey]*CoverEntry
+	allCoverprofileMapKeys []blockKey
 	allCoverprofileMapMu   sync.RWMutex
 	chanGIDMap             map[uintptr]*chanLinks
 	chanGIDMapMu           sync.Mutex
@@ -375,7 +375,7 @@ func setG(gid uint64, g *TraceG) {
 	gMapMu.Unlock()
 }
 
-func getBlock(blockID string) *Block {
+func getBlock(blockID blockKey) *Block {
 	blockMapMu.RLock()
 	defer blockMapMu.RUnlock()
 
@@ -498,7 +498,7 @@ func Trace(fileName string, pgid, gid uint64, blockIdx, startLine, endLine, star
 	}
 	isEnabledTraceMu.RUnlock()
 
-	blockIDStr := blockID(fileName, blockIdx)
+	bid := blockID(fileName, blockIdx)
 
 	g := getG(gid)
 	if g == nil {
@@ -508,7 +508,7 @@ func Trace(fileName string, pgid, gid uint64, blockIdx, startLine, endLine, star
 			parent.linkG(g)
 		}
 	}
-	g.addCounter(blockIDStr)
+	g.addCounter(bid)
 }
 
 type Metadata struct {
@@ -575,9 +575,9 @@ func initMap() {
 
 		entryMap = make(map[string]*TraceEntry)
 		gMap = make(map[uint64]*TraceG)
-		blockMap = make(map[string]*Block)
+		blockMap = make(map[blockKey]*Block)
 		funcMap = make(map[string]*Function)
-		allCoverprofileMap = make(map[string]*CoverEntry)
+		allCoverprofileMap = make(map[blockKey]*CoverEntry)
 		chanGIDMap = make(map[uintptr]*chanLinks)
 	})
 }
@@ -705,7 +705,7 @@ func decodeRawMetas() {
 	})
 }
 
-func toEntries(coverMap map[string]*CoverEntry) []*CoverEntry {
+func toEntries(coverMap map[blockKey]*CoverEntry) []*CoverEntry {
 	entries := make([]*CoverEntry, 0, len(coverMap))
 	for _, key := range allCoverprofileMapKeys {
 		entry, exists := coverMap[key]
@@ -717,7 +717,7 @@ func toEntries(coverMap map[string]*CoverEntry) []*CoverEntry {
 	return entries
 }
 
-func renderMap(mode string, coverMap map[string]*CoverEntry) string {
+func renderMap(mode string, coverMap map[blockKey]*CoverEntry) string {
 	b := bytes.NewBuffer([]byte(fmt.Sprintf("mode: %s\n", mode)))
 	for _, key := range allCoverprofileMapKeys {
 		value, exists := coverMap[key]
@@ -729,8 +729,16 @@ func renderMap(mode string, coverMap map[string]*CoverEntry) string {
 	return b.String()
 }
 
-func blockID(fileName string, blockIdx int) string {
-	return fmt.Sprintf("%s:%d", fileName, blockIdx)
+// blockKey identifies an instrumented block. It is a comparable value rather
+// than a formatted string so that Trace, which runs once per executed block,
+// can build it without allocating.
+type blockKey struct {
+	fileName string
+	idx      int
+}
+
+func blockID(fileName string, blockIdx int) blockKey {
+	return blockKey{fileName: fileName, idx: blockIdx}
 }
 
 // CoverReportData holds compact coverage data built from internal state.
@@ -779,15 +787,15 @@ func CollectCoverReportData() *CoverReportData {
 	}
 
 	// Build block key to index map and "all" array.
-	type blockKey struct {
+	type posKey struct {
 		fileIdx                                        int
 		startLine, startCol, endLine, endCol, numStmts int
 	}
-	blockIndex := make(map[blockKey]int)
+	blockIndex := make(map[posKey]int)
 	var all [][]int
 	for _, key := range allCoverprofileMapKeys {
 		e := allCoverprofileMap[key]
-		bk := blockKey{
+		bk := posKey{
 			fileIdx:   fileSet[e.FileName],
 			startLine: e.StartLine,
 			startCol:  e.StartCol,
@@ -803,7 +811,7 @@ func CollectCoverReportData() *CoverReportData {
 
 	// Build allcounts from all goroutines.
 	gMapMu.RLock()
-	blockToCountMap := make(map[string]int)
+	blockToCountMap := make(map[blockKey]int)
 	for _, g := range gMap {
 		g.blockToCountMap(blockToCountMap, make(map[uint64]struct{}))
 	}
@@ -815,7 +823,7 @@ func CollectCoverReportData() *CoverReportData {
 		if block == nil {
 			continue
 		}
-		bk := blockKey{
+		bk := posKey{
 			fileIdx:   fileSet[block.FileName],
 			startLine: block.Start.Line,
 			startCol:  block.Start.Col,
@@ -843,7 +851,7 @@ func CollectCoverReportData() *CoverReportData {
 		entries := entriesMap[name]
 		profile := make([][]int, 0, len(entries))
 		for _, e := range entries {
-			bk := blockKey{
+			bk := posKey{
 				fileIdx:   fileSet[e.FileName],
 				startLine: e.StartLine,
 				startCol:  e.StartCol,
@@ -1036,7 +1044,7 @@ func EncodeCounters() ([]byte, error) {
 	defer mdMu.RUnlock()
 	defer gMapMu.RUnlock()
 
-	blockToCountMap := make(map[string]int)
+	blockToCountMap := make(map[blockKey]int)
 	for _, g := range gMap {
 		g.blockToCountMap(blockToCountMap, make(map[uint64]struct{}))
 	}
