@@ -106,6 +106,9 @@ type frontiers struct {
 	ci     *coverBitIndex
 	byNode map[*callgraph.Node]*frontierSet
 	empty  *frontierSet
+	// stops holds the nodes the walk does not expand, with the frontier each
+	// contributes; see notExpanded.
+	stops map[*callgraph.Node]*frontierSet
 }
 
 // notExpanded reports the frontier of a node the walk stops at: a coverage
@@ -148,6 +151,7 @@ func newFrontiers(rtaGraph *callgraph.Graph, followable *followableCallees, cove
 			stops[n] = set
 		}
 	}
+	fr.stops = stops
 	calleesOf := func(n *callgraph.Node) []*callgraph.Node {
 		if _, ok := stops[n]; ok {
 			return nil

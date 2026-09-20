@@ -137,6 +137,8 @@ func (c *CLI) handleSubcommand(ctx context.Context, tobariBinPath, cmd string, a
 	switch cmd {
 	case "flags":
 		return c.runFlagsCmd(ctx, tobariBinPath, args)
+	case "analysis":
+		return c.runAnalysisCmd(ctx, args)
 	case "extract":
 		return c.runExtractCmd(ctx, args)
 	case "html":
