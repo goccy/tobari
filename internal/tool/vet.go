@@ -12,7 +12,7 @@ func handleVet(ctx context.Context, toolPath string, args []string) error {
 	if err := fixVetCfgImportMap(args); err != nil {
 		return err
 	}
-	runCommand(toolPath, args)
+	runCommand(ctx, toolPath, args)
 	return nil
 }
 

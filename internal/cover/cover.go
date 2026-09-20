@@ -89,7 +89,7 @@ func Run(ctx context.Context, args []string, opts Options) error {
 		// This prevents races when go test ./... builds multiple packages in
 		// parallel, as each package gets its own isolated file.
 		if !opts.PassedBlocksOnly {
-			if err := createAndWriteSuppDeps(nil, true, pkgcfg, filepath.Dir(inputFiles[0]), opts.ExcludeAnalysis); err != nil {
+			if err := createAndWriteSuppDeps(ctx, nil, true, pkgcfg, filepath.Dir(inputFiles[0]), opts.ExcludeAnalysis); err != nil {
 				return err
 			}
 		}
@@ -114,7 +114,7 @@ func Run(ctx context.Context, args []string, opts Options) error {
 			if opt.pkgcfg != "" {
 				workDir = filepath.Dir(opt.pkgcfg)
 			}
-			if err := createAndWriteSuppDeps(inputFiles, false, nil, workDir, opts.ExcludeAnalysis); err != nil {
+			if err := createAndWriteSuppDeps(ctx, inputFiles, false, nil, workDir, opts.ExcludeAnalysis); err != nil {
 				return err
 			}
 		}
@@ -1243,8 +1243,8 @@ func (b *Buffer) Bytes() []byte {
 // testPkgCfg provides the package config for directory resolution.
 // workDir, when non-empty, specifies the directory to write the suppDeps
 // file to (used in testmain mode to avoid races in parallel builds).
-func createAndWriteSuppDeps(mainSourceFiles []string, isTestMode bool, testPkgCfg *PackageConfig, workDir string, excludeAnalysis []string) error {
-	suppDeps, err := CreateMainDeps(mainSourceFiles, isTestMode, testPkgCfg, excludeAnalysis)
+func createAndWriteSuppDeps(ctx context.Context, mainSourceFiles []string, isTestMode bool, testPkgCfg *PackageConfig, workDir string, excludeAnalysis []string) error {
+	suppDeps, err := CreateMainDeps(ctx, mainSourceFiles, isTestMode, testPkgCfg, excludeAnalysis)
 	if err != nil {
 		return err
 	}

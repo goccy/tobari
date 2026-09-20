@@ -8,7 +8,7 @@ import (
 func handleLink(ctx context.Context, toolPath string, args []string, opts BuildOpts) error {
 	importCfgPath := getImportcfgPathFromArgs(args)
 	if importCfgPath == "" {
-		runCommand(toolPath, args)
+		runCommand(ctx, toolPath, args)
 		return nil
 	}
 
@@ -46,6 +46,6 @@ func handleLink(ctx context.Context, toolPath string, args []string, opts BuildO
 		}
 	}
 
-	runCommand(toolPath, args)
+	runCommand(ctx, toolPath, args)
 	return nil
 }

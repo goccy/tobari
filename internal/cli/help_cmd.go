@@ -65,6 +65,11 @@ Toolexec Options (used with -toolexec):
     --passed-blocks-only
                         Record only the blocks that were actually passed
 
+Environment Variables (build time):
+    TOBARI_OTEL_DIR     Absolute path of a directory to write OpenTelemetry traces
+                        and metrics of the build to: every tool invocation, the
+                        stages of the dependency analysis, and its cost per package
+
 Examples:
     # Get flags for go build
     go build $(tobari flags) ./...
@@ -77,6 +82,9 @@ Examples:
 
     # Use tobari directly as toolexec with source embedding
     go build -cover -toolexec='tobari --embed-code' ./...
+
+    # Record where the build spends its time
+    TOBARI_OTEL_DIR=/tmp/tobari-otel go build $(tobari flags) ./...
 
     # Use tobari with build tags (e.g., timetzdata)
     GOFLAGS=$(tobari flags -tags=timetzdata) go build ./...

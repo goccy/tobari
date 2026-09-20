@@ -141,6 +141,56 @@ GOFLAGS="$(tobari flags -tags=timetzdata)" go build .
 This example shows distinguishing coverage results by name, but you can also use it the same way as `runtime/coverage`.
 For specific APIs, please [refer here](https://pkg.go.dev/github.com/goccy/tobari).
 
+### Finding Out Where the Build Time Goes
+
+Set `TOBARI_OTEL_DIR` to an absolute directory path and tobari reports what it
+spent the build on as [OpenTelemetry](https://opentelemetry.io/) traces and
+metrics:
+
+```console
+TOBARI_OTEL_DIR=/tmp/tobari-otel GOFLAGS="$(tobari flags)" go build .
+```
+
+Every tobari process of the build writes its own `tobari_traces_*.jsonl` and
+`tobari_metrics_*.jsonl` files there, in the OTLP/JSON line format that the
+OpenTelemetry Collector's
+[`otlpjsonfile` receiver](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/otlpjsonfilereceiver)
+ingests. The files of all builds that share the directory accumulate, so use a
+fresh directory (or remove the files) per measurement.
+
+**Traces.** One build is one trace. If `TRACEPARENT` is set
+([W3C Trace Context](https://www.w3.org/TR/trace-context/)), the build is recorded
+under that span, which lets a CI pipeline that is itself traced include it.
+
+| Span | What it covers |
+|------|----------------|
+| `tobari.tool` | One tool invocation. `tobari.tool` is the tool (`cover`, `compile`, `link`, ...), `tobari.package` the package being built |
+| `tobari.tool.exec` | The part of it spent in the real Go tool; the rest is tobari's own work |
+| `tobari.analysis` | One whole-program dependency analysis: once per main package, once per test binary |
+| `tobari.analysis.go_list`, `.load`, `.ssa_create`, `.ssa_build`, `.rta`, `.vta`, `.followable_callees`, `.frontiers`, `.dependencies` | The stages of the analysis, in order |
+| `tobari.analysis.ssa_build.package` | The SSA build of one package |
+
+**Metrics.** Each analysis reports one point per package, attributed with
+`tobari.package` and with `tobari.module`, the module providing the package
+(`std` for the standard library):
+
+| Metric | Meaning |
+|--------|---------|
+| `tobari.analysis.package.ssa_build.duration` | Seconds spent building the package's SSA form. Packages are built concurrently and a package pays for the generic instantiations it is the first to need, so use it to rank packages rather than as an exact cost |
+| `tobari.analysis.package.reachable_functions` | Number of the package's functions in the call graph |
+| `tobari.analysis.package.call_edges` | Number of call edges leaving those functions |
+| `tobari.analysis.package.skipped` | Reported for each package `--exclude-analysis` kept out of the analysis |
+
+The call graph stages (`rta`, `vta`) are whole-program computations whose time
+cannot be split by package; `reachable_functions` and `call_edges` show which
+packages they are working on. A module that ranks high in these metrics and
+never calls back into your code is a candidate for `--exclude-analysis`, described
+next, and a module path is exactly what that option takes.
+
+A build that hits Go's build cache does not run the tools at all, so there is
+nothing to report for it; measure with a clean cache (`GOCACHE=$(mktemp -d)`) to
+see the full cost.
+
 ### Speeding Up the Dependency Analysis
 
 When the main package is built, tobari runs a whole-program call-graph analysis
@@ -808,6 +858,7 @@ Show help message with all commands and options.
 | Variable | Description |
 |----------|-------------|
 | `TOBARI_COVERDIR` | Directory for coverage output files (default: current directory) |
+| `TOBARI_OTEL_DIR` | Build time only. Absolute path of the directory to write OpenTelemetry traces and metrics of the build to (default: disabled). See [Finding Out Where the Build Time Goes](#finding-out-where-the-build-time-goes) |
 
 # License
 
