@@ -345,11 +345,16 @@ func collectAnonymFuncsFromInfo(fset *token.FileSet, file *ast.File, body *ast.B
 // in the number of reachable types and interface call sites: on large services
 // the generated gRPC/protobuf client packages dominate the analysis while
 // contributing no cover→cover edges.
-func CreateMainDeps(ctx context.Context, mainSourceFiles []string, isTestMode bool, testPkgCfg *PackageConfig, excludeAnalysis []string) (map[string][]string, error) {
+//
+// target is the import path of the main package or test binary being built. It
+// names the analysis report written for this analysis; no report is written
+// when it is empty.
+func CreateMainDeps(ctx context.Context, target string, mainSourceFiles []string, isTestMode bool, testPkgCfg *PackageConfig, excludeAnalysis []string) (map[string][]string, error) {
 	ctx, span := telemetry.Start(ctx, "tobari.analysis", telemetry.Bool("tobari.analysis.test", isTestMode))
 	defer span.End()
 
-	loaded, err := loadProgram(ctx, mainSourceFiles, isTestMode, testPkgCfg)
+	rec := newAnalysisRecorder()
+	loaded, err := loadProgram(ctx, rec, mainSourceFiles, isTestMode, testPkgCfg)
 	if err != nil {
 		span.Fail(err)
 		return nil, err
@@ -357,14 +362,26 @@ func CreateMainDeps(ctx context.Context, mainSourceFiles []string, isTestMode bo
 	if loaded == nil {
 		return nil, nil
 	}
-	return analyze(ctx, loaded, func(ssaPkg *ssa.Package) bool {
+	suppDeps := analyze(ctx, rec, loaded, func(ssaPkg *ssa.Package) bool {
 		return !isMainPkg(ssaPkg) && isExcludedFromAnalysis(ssaPkg.Pkg.Path(), excludeAnalysis, loaded.coverPkgSet)
-	}), nil
+	})
+	if target != "" {
+		// The report is a by-product. A source tree that cannot be written to
+		// (a read-only mount, the module cache) must not fail a build that
+		// would otherwise succeed, so the failure is reported and the build
+		// goes on.
+		if err := writeAnalysisReport(AnalysisReportDir(loaded.dir), rec.report(target)); err != nil {
+			fmt.Fprintf(os.Stderr, "tobari: %v\n", err)
+		}
+	}
+	return suppDeps, nil
 }
 
 // loadedProgram is the type-checked source of a whole program, the input the
 // analysis stages share.
 type loadedProgram struct {
+	// dir is the directory of the main package (or the package under test).
+	dir  string
 	pkgs []*packages.Package
 	// coverPkgSet holds the coverage-target packages the program depends on.
 	coverPkgSet map[string]struct{}
@@ -382,7 +399,7 @@ const stdModule = "std"
 // loadProgram lists, parses and type-checks the program rooted at the main
 // package (or test binary). It returns nil when the program has no
 // coverage-target packages, in which case there is nothing to analyze.
-func loadProgram(ctx context.Context, mainSourceFiles []string, isTestMode bool, testPkgCfg *PackageConfig) (*loadedProgram, error) {
+func loadProgram(ctx context.Context, rec *analysisRecorder, mainSourceFiles []string, isTestMode bool, testPkgCfg *PackageConfig) (*loadedProgram, error) {
 	tobariBin, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tobari binary path: %w", err)
@@ -398,9 +415,9 @@ func loadProgram(ctx context.Context, mainSourceFiles []string, isTestMode bool,
 		return nil, err
 	}
 
-	_, listSpan := telemetry.Start(ctx, "tobari.analysis.go_list")
+	_, endList := rec.stage(ctx, "go_list")
 	goListJSON, err := utils.GoListDepsJSON(dir, isTestMode, ".")
-	listSpan.End()
+	endList()
 	if err != nil {
 		return nil, fmt.Errorf("failed to run go list: %w", err)
 	}
@@ -429,8 +446,7 @@ func loadProgram(ctx context.Context, mainSourceFiles []string, isTestMode bool,
 	}
 	defer func() { _ = os.Remove(coverPkgPathsFile) }()
 
-	loadCtx, loadSpan := telemetry.Start(ctx, "tobari.analysis.load")
-	defer loadSpan.End()
+	loadCtx, endLoad := rec.stage(ctx, "load")
 
 	env := append(utils.FilterGOFLAGSEnvs(),
 		"GOPACKAGESDRIVER="+tobariBin,
@@ -455,6 +471,7 @@ func loadProgram(ctx context.Context, mainSourceFiles []string, isTestMode bool,
 
 	pkgs, err := packages.Load(cfg, ".")
 	if err != nil {
+		endLoad()
 		return nil, err
 	}
 
@@ -465,6 +482,7 @@ func loadProgram(ctx context.Context, mainSourceFiles []string, isTestMode bool,
 		}
 	}
 	if len(pkgErrs) != 0 {
+		endLoad()
 		return nil, errors.Join(pkgErrs...)
 	}
 
@@ -481,9 +499,9 @@ func loadProgram(ctx context.Context, mainSourceFiles []string, isTestMode bool,
 		}
 	}
 
-	loadSpan.SetAttrs(telemetry.Int("tobari.analysis.packages", len(allDepPaths)))
+	endLoad(telemetry.Int("tobari.analysis.packages", len(allDepPaths)))
 
-	return &loadedProgram{pkgs: pkgs, coverPkgSet: coverPkgSet, modules: coverResult.modules}, nil
+	return &loadedProgram{dir: dir, pkgs: pkgs, coverPkgSet: coverPkgSet, modules: coverResult.modules}, nil
 }
 
 // analyze runs the whole-program call graph analysis over a loaded program and
@@ -492,14 +510,14 @@ func loadProgram(ctx context.Context, mainSourceFiles []string, isTestMode bool,
 // skip reports the packages whose SSA bodies are not built; see the
 // excludeAnalysis parameter of CreateMainDeps for what that means for the
 // result. It is only asked about packages that have a types.Package.
-func analyze(ctx context.Context, loaded *loadedProgram, skip func(*ssa.Package) bool) map[string][]string {
+func analyze(ctx context.Context, rec *analysisRecorder, loaded *loadedProgram, skip func(*ssa.Package) bool) map[string][]string {
 	coverPkgSet := loaded.coverPkgSet
 
-	_, createSpan := telemetry.Start(ctx, "tobari.analysis.ssa_create")
+	_, endCreate := rec.stage(ctx, "ssa_create")
 	prog, _ := ssautil.AllPackages(loaded.pkgs, ssa.InstantiateGenerics)
-	createSpan.End()
+	endCreate()
 
-	buildSSA(ctx, prog, loaded, skip)
+	buildSSA(ctx, rec, prog, loaded, skip)
 
 	// Collect RTA roots from main/test packages and cover-target packages.
 	//
@@ -553,12 +571,11 @@ func analyze(ctx context.Context, loaded *loadedProgram, skip func(*ssa.Package)
 		return nil
 	}
 
-	_, rtaSpan := telemetry.Start(ctx, "tobari.analysis.rta", telemetry.Int("tobari.analysis.roots", len(roots)))
+	_, endRTA := rec.stage(ctx, "rta", telemetry.Int("tobari.analysis.roots", len(roots)))
 	rtaResult := rta.Analyze(roots, true)
 	graph := rtaResult.CallGraph
-	rtaSpan.SetAttrs(telemetry.Int("tobari.analysis.reachable_functions", len(rtaResult.Reachable)))
-	rtaSpan.End()
-	recordReachability(ctx, loaded, graph)
+	endRTA(telemetry.Int("tobari.analysis.reachable_functions", len(rtaResult.Reachable)))
+	recordReachability(ctx, rec, loaded, graph)
 
 	// RTA resolves dynamic calls far too broadly for scoped coverage: a
 	// function-value call (e.g. sync.Once's f()) is resolved purely by
@@ -597,20 +614,20 @@ func analyze(ctx context.Context, loaded *loadedProgram, skip func(*ssa.Package)
 	// no node for to no callees at all — so the eager initial graph could
 	// drop edges this one keeps. Any difference is therefore in the
 	// direction of confirming more RTA edges, never fewer.
-	_, vtaSpan := telemetry.Start(ctx, "tobari.analysis.vta")
+	_, endVTA := rec.stage(ctx, "vta")
 	vtaGraph := vta.CallGraph(vtaFuncs, nil)
-	vtaSpan.End()
+	endVTA()
 
-	_, followableSpan := telemetry.Start(ctx, "tobari.analysis.followable_callees")
+	_, endFollowable := rec.stage(ctx, "followable_callees")
 	followable := newFollowableCallees(graph, vtaGraph)
-	followableSpan.End()
+	endFollowable()
 
-	_, frontierSpan := telemetry.Start(ctx, "tobari.analysis.frontiers")
+	_, endFrontiers := rec.stage(ctx, "frontiers")
 	frontierSets := newFrontiers(graph, followable, coverPkgSet)
-	frontierSpan.End()
+	endFrontiers()
+	recordOnPath(ctx, rec, loaded, graph, followable, frontierSets)
 
-	_, depsSpan := telemetry.Start(ctx, "tobari.analysis.dependencies")
-	defer depsSpan.End()
+	_, endDeps := rec.stage(ctx, "dependencies")
 
 	// Build dependency map for coverage-target packages.
 	//
@@ -632,7 +649,7 @@ func analyze(ctx context.Context, loaded *loadedProgram, skip func(*ssa.Package)
 		suppDeps[fnName] = mergeDeps(suppDeps[fnName], deps)
 	}
 
-	depsSpan.SetAttrs(telemetry.Int("tobari.analysis.cover_functions", len(suppDeps)))
+	endDeps(telemetry.Int("tobari.analysis.cover_functions", len(suppDeps)))
 	return suppDeps
 }
 

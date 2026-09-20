@@ -10,6 +10,7 @@ Usage:
 
 Commands:
     flags       Output flags for go build/test with coverage
+    analysis    Show what the dependency analysis cost per module
     extract     Extract embedded source code from an instrumented binary
     html        Generate HTML coverage report
     convert     Convert tobari.json to coverprofile format
@@ -57,6 +58,13 @@ Merge Command:
                     Duplicate archives (same SHA-256 hash) are skipped.
                     Conflicting files (same path, different content) cause an error.
 
+Analysis Command Options:
+    -json               Print the summary as JSON
+    -min-share=PERCENT  Minimum share of the analysis time for a module to be
+                        listed as a candidate for -exclude-analysis (default: 1)
+    [dir...]            Directories to search for tobari/analysis reports
+                        (default: TOBARI_COVERDIR, or the current directory)
+
 Toolexec Options (used with -toolexec):
     --embed-code        Embed original source code into the instrumented binary
     --exclude-analysis=PKGS
@@ -85,6 +93,9 @@ Examples:
 
     # Record where the build spends its time
     TOBARI_OTEL_DIR=/tmp/tobari-otel go build $(tobari flags) ./...
+
+    # Find the dependencies that slow the dependency analysis down
+    go build $(tobari flags) . && tobari analysis
 
     # Use tobari with build tags (e.g., timetzdata)
     GOFLAGS=$(tobari flags -tags=timetzdata) go build ./...

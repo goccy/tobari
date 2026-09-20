@@ -22,6 +22,7 @@ const (
 	metricReachableFunctions = "tobari.analysis.package.reachable_functions"
 	metricCallEdges          = "tobari.analysis.package.call_edges"
 	metricSkipped            = "tobari.analysis.package.skipped"
+	metricOnPath             = "tobari.analysis.package.on_path"
 )
 
 func packageAttrs(loaded *loadedProgram, pkgPath string) []telemetry.Attr {
@@ -40,16 +41,25 @@ func packageAttrs(loaded *loadedProgram, pkgPath string) []telemetry.Attr {
 // includes the generic instantiations the package is the first to demand, so
 // it ranks packages against each other rather than measuring them in
 // isolation.
-func buildSSA(ctx context.Context, prog *ssa.Program, loaded *loadedProgram, skip func(*ssa.Package) bool) {
-	ctx, span := telemetry.Start(ctx, "tobari.analysis.ssa_build")
-	defer span.End()
+func buildSSA(ctx context.Context, rec *analysisRecorder, prog *ssa.Program, loaded *loadedProgram, skip func(*ssa.Package) bool) {
+	ctx, end := rec.stage(ctx, "ssa_build")
 
 	var targets []*ssa.Package
 	skipped := 0
 	for _, ssaPkg := range prog.AllPackages() {
-		if ssaPkg.Pkg != nil && skip(ssaPkg) {
+		if ssaPkg.Pkg == nil {
+			targets = append(targets, ssaPkg)
+			continue
+		}
+		pkgPath := ssaPkg.Pkg.Path()
+		isSkipped := skip(ssaPkg)
+		rec.update(loaded, pkgPath, func(pkg *AnalysisPackage) {
+			pkg.Skipped = isSkipped
+			pkg.Required = isMainPkg(ssaPkg) || isMainOrTestPkg(pkgPath) || matchCoverPkg(pkgPath, loaded.coverPkgSet) != ""
+		})
+		if isSkipped {
 			skipped++
-			telemetry.RecordCount(ctx, metricSkipped, 1, packageAttrs(loaded, ssaPkg.Pkg.Path())...)
+			telemetry.RecordCount(ctx, metricSkipped, 1, packageAttrs(loaded, pkgPath)...)
 			continue
 		}
 		targets = append(targets, ssaPkg)
@@ -57,10 +67,6 @@ func buildSSA(ctx context.Context, prog *ssa.Program, loaded *loadedProgram, ski
 	sort.Slice(targets, func(i, j int) bool {
 		return ssaPkgPath(targets[i]) < ssaPkgPath(targets[j])
 	})
-	span.SetAttrs(
-		telemetry.Int("tobari.analysis.built_packages", len(targets)),
-		telemetry.Int("tobari.analysis.skipped_packages", skipped),
-	)
 
 	queue := make(chan *ssa.Package)
 	var wg sync.WaitGroup
@@ -69,12 +75,19 @@ func buildSSA(ctx context.Context, prog *ssa.Program, loaded *loadedProgram, ski
 		go func() {
 			defer wg.Done()
 			for ssaPkg := range queue {
-				attrs := packageAttrs(loaded, ssaPkgPath(ssaPkg))
+				pkgPath := ssaPkgPath(ssaPkg)
+				attrs := packageAttrs(loaded, pkgPath)
 				_, pkgSpan := telemetry.Start(ctx, "tobari.analysis.ssa_build.package", attrs...)
 				start := time.Now()
 				ssaPkg.Build()
-				telemetry.RecordSeconds(ctx, metricSSABuildSeconds, time.Since(start), attrs...)
+				elapsed := time.Since(start)
 				pkgSpan.End()
+				telemetry.RecordSeconds(ctx, metricSSABuildSeconds, elapsed, attrs...)
+				if ssaPkg.Pkg != nil {
+					rec.update(loaded, pkgPath, func(pkg *AnalysisPackage) {
+						pkg.SSABuildSeconds = elapsed.Seconds()
+					})
+				}
 			}
 		}()
 	}
@@ -83,6 +96,11 @@ func buildSSA(ctx context.Context, prog *ssa.Program, loaded *loadedProgram, ski
 	}
 	close(queue)
 	wg.Wait()
+
+	end(
+		telemetry.Int("tobari.analysis.built_packages", len(targets)),
+		telemetry.Int("tobari.analysis.skipped_packages", skipped),
+	)
 }
 
 // recordReachability reports, per package, how many of its functions the RTA
@@ -93,10 +111,7 @@ func buildSSA(ctx context.Context, prog *ssa.Program, loaded *loadedProgram, ski
 // the call graph stages are spending their time on: both stages do work per
 // reachable function and per edge. Synthetic functions that belong to no
 // package, such as wrappers and bound-method closures, are not counted.
-func recordReachability(ctx context.Context, loaded *loadedProgram, graph *callgraph.Graph) {
-	if !telemetry.Enabled(ctx) {
-		return
-	}
+func recordReachability(ctx context.Context, rec *analysisRecorder, loaded *loadedProgram, graph *callgraph.Graph) {
 	type size struct{ functions, edges int }
 	sizes := make(map[string]*size)
 	for fn, node := range graph.Nodes {
@@ -112,14 +127,77 @@ func recordReachability(ctx context.Context, loaded *loadedProgram, graph *callg
 		s.functions++
 		s.edges += len(node.Out)
 	}
-	pkgPaths := make([]string, 0, len(sizes))
-	for pkgPath := range sizes {
-		pkgPaths = append(pkgPaths, pkgPath)
-	}
-	sort.Strings(pkgPaths)
-	for _, pkgPath := range pkgPaths {
+	for _, pkgPath := range sortedKeys(sizes) {
+		s := sizes[pkgPath]
+		rec.update(loaded, pkgPath, func(pkg *AnalysisPackage) {
+			pkg.ReachableFunctions = s.functions
+			pkg.CallEdges = s.edges
+		})
 		attrs := packageAttrs(loaded, pkgPath)
-		telemetry.RecordCount(ctx, metricReachableFunctions, sizes[pkgPath].functions, attrs...)
-		telemetry.RecordCount(ctx, metricCallEdges, sizes[pkgPath].edges, attrs...)
+		telemetry.RecordCount(ctx, metricReachableFunctions, s.functions, attrs...)
+		telemetry.RecordCount(ctx, metricCallEdges, s.edges, attrs...)
 	}
+}
+
+// recordOnPath marks the packages that a call path between two
+// coverage-target functions runs through; see AnalysisPackage.OnPath.
+func recordOnPath(ctx context.Context, rec *analysisRecorder, loaded *loadedProgram, graph *callgraph.Graph, followable *followableCallees, fr *frontiers) {
+	onPath := onPathPackages(graph, followable, fr)
+	for _, pkgPath := range sortedKeys(onPath) {
+		rec.update(loaded, pkgPath, func(pkg *AnalysisPackage) { pkg.OnPath = true })
+		telemetry.RecordCount(ctx, metricOnPath, 1, packageAttrs(loaded, pkgPath)...)
+	}
+}
+
+// onPathPackages returns the packages owning a function that lies strictly
+// between two coverage-target functions on a followable call path.
+//
+// Such a function is one the dependency walk expands — not a coverage target,
+// not in a cut-off package — that is reached from a coverage-target function
+// through expanded nodes only, and from which the walk goes on to reach a
+// coverage target, i.e. whose frontier is not empty. Both halves follow the
+// walk newFrontiers performs, so a package is on a path exactly when the
+// dependencies computed for some coverage-target function pass through it.
+func onPathPackages(graph *callgraph.Graph, followable *followableCallees, fr *frontiers) map[string]struct{} {
+	isTarget := func(n *callgraph.Node) bool {
+		set, ok := fr.stops[n]
+		return ok && set != fr.empty
+	}
+
+	onPath := make(map[string]struct{})
+	seen := make(map[*callgraph.Node]struct{})
+	var pending []*callgraph.Node
+	for _, n := range graph.Nodes {
+		if isTarget(n) {
+			pending = append(pending, followable.from(n)...)
+		}
+	}
+	for len(pending) > 0 {
+		n := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		if _, stops := fr.stops[n]; stops {
+			continue
+		}
+		pending = append(pending, followable.from(n)...)
+		if set := fr.byNode[n]; set == nil || set == fr.empty {
+			continue
+		}
+		if pkgPath := resolvePkgPath(n.Func); pkgPath != "" {
+			onPath[pkgPath] = struct{}{}
+		}
+	}
+	return onPath
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }

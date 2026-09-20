@@ -180,6 +180,7 @@ under that span, which lets a CI pipeline that is itself traced include it.
 | `tobari.analysis.package.reachable_functions` | Number of the package's functions in the call graph |
 | `tobari.analysis.package.call_edges` | Number of call edges leaving those functions |
 | `tobari.analysis.package.skipped` | Reported for each package `--exclude-analysis` kept out of the analysis |
+| `tobari.analysis.package.on_path` | Reported for each package that a call path between two coverage-target functions runs through |
 
 The call graph stages (`rta`, `vta`) are whole-program computations whose time
 cannot be split by package; `reachable_functions` and `call_edges` show which
@@ -190,6 +191,57 @@ next, and a module path is exactly what that option takes.
 A build that hits Go's build cache does not run the tools at all, so there is
 nothing to report for it; measure with a clean cache (`GOCACHE=$(mktemp -d)`) to
 see the full cost.
+
+### Finding the Dependencies That Slow the Analysis Down
+
+Every dependency analysis leaves a report of what it cost and of what each
+package meant to its result. `tobari analysis` reads those reports and sums them
+up per module:
+
+```console
+$ GOFLAGS="$(tobari flags)" go build .
+$ tobari analysis
+example.com/app
+  analysis 131.20s (go_list 0.41s, load 9.80s, ssa_create 0.22s, ssa_build 12.10s, rta 31.47s, vta 75.90s, ...)
+
+  MODULE                         PACKAGES  EST. TIME  SHARE  FUNCTIONS  CALL EDGES  ROLE
+  example.com/gen/proto          212       58.10s     48.0%  48211      391045      off-path
+  std                            164       21.35s     17.6%  17302      143200      on-path
+  github.com/example/router      9         2.04s      1.7%   803        9120        on-path
+  example.com/app                41        1.92s      1.6%   1204       8811        required
+  ...
+
+  No call path between coverage targets ran through these modules in this
+  build. Exclude only those you never hand a callback or an interface value
+  implemented by your code:
+
+    -exclude-analysis=example.com/gen/proto
+```
+
+`ROLE` says what the module was to the analysis:
+
+| Role | Meaning |
+|------|---------|
+| `required` | Holds a coverage target or the main package. Never excluded |
+| `on-path` | A call path from one coverage-target function to another runs through it (for example, it calls a callback you passed in). Excluding it would lose those dependencies |
+| `off-path` | Analyzed, but no such path ran through it in this build |
+| `skipped` | Already kept out of the analysis by `--exclude-analysis` |
+
+`EST. TIME` is an estimate made for ranking, not a measurement: only the SSA build
+is timed per package, and the time of the whole-program call graph stages is
+split by each module's share of the call edges.
+
+The printed `-exclude-analysis=` value lists the `off-path` modules whose share is
+at least `-min-share` percent (default 1). It is a suggestion to review, not a
+verdict: see the correctness requirement of `--exclude-analysis` below.
+
+The reports are written to `tobari/analysis/` next to the coverage results: in the
+directory of the analyzed main package (or of the package under test), or under
+`TOBARI_COVERDIR` when it is set. `tobari analysis` searches the given directories
+— `TOBARI_COVERDIR`, or else the current directory, when none is given — for
+them, so after `go test ./...` a single `tobari analysis` at the module root
+shows every test binary. A build served from Go's build cache runs no analysis
+and leaves the previous report in place.
 
 ### Speeding Up the Dependency Analysis
 
@@ -783,6 +835,25 @@ GOFLAGS="$(tobari flags -E)" go build .
 GOFLAGS="$(tobari flags -tags=timetzdata)" go build .
 ```
 
+### `tobari analysis`
+
+Show what the dependency analysis of each built target cost per module, and which
+modules are candidates for `--exclude-analysis`. See
+[Finding the Dependencies That Slow the Analysis Down](#finding-the-dependencies-that-slow-the-analysis-down).
+
+```console
+tobari analysis [-json] [-min-share percent] [dir...]
+```
+
+| Flag | Description |
+|------|-------------|
+| `-json` | Print the summary as JSON |
+| `-min-share` | Minimum share of the analysis time, in percent, for a module to be listed as a candidate (default: `1`) |
+
+`dir` is searched recursively for `tobari/analysis/` report directories (hidden
+directories are skipped). Default: `TOBARI_COVERDIR` if set, otherwise the
+current directory.
+
 ### `tobari extract`
 
 Extract embedded source code from an instrumented binary built with `--embed-code`.
@@ -857,7 +928,7 @@ Show help message with all commands and options.
 
 | Variable | Description |
 |----------|-------------|
-| `TOBARI_COVERDIR` | Directory for coverage output files (default: current directory) |
+| `TOBARI_COVERDIR` | Directory for coverage output files (default: current directory). At build time, also the directory the analysis reports read by `tobari analysis` are written under (default: the directory of the analyzed package) |
 | `TOBARI_OTEL_DIR` | Build time only. Absolute path of the directory to write OpenTelemetry traces and metrics of the build to (default: disabled). See [Finding Out Where the Build Time Goes](#finding-out-where-the-build-time-goes) |
 
 # License

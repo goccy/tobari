@@ -34,3 +34,4 @@ go.work.sum
 *.cover
 tobari.json
 tobari.toon
+**/tobari/analysis/

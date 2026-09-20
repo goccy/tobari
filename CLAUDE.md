@@ -46,6 +46,14 @@ Content-hash-keyed caches that survive Go build cache hits (when the cover/compi
 | `coverpkgs/` | Package directory path (SHA256) | Registry of coverage-target packages |
 | `overlay/<content_hash>/` | Overlay file content (SHA256, 16 chars) | Modified runtime/testing/testdeps packages |
 
+### `<package dir>/tobari/analysis/` — Per-target, persistent, user-visible
+
+Written by the cover tool after each whole-program analysis, next to the coverage results the instrumented program writes (`tobari/tobari.json`). The base directory is the directory of the analyzed main package (or of the package under test), or `TOBARI_COVERDIR` when set. Each target has its own file, written atomically, so the parallel analyses of `go test ./...` do not race. A failure to write is reported on stderr and does not fail the build.
+
+| File | Writer | Reader | Purpose |
+|---|---|---|---|
+| `<url-path-escaped target import path>.json` | cover tool | `tobari analysis` | Stage durations and, per package, SSA build time, call graph share, and role (required / on-path / skipped) |
+
 ### Ephemeral temp files (`os.CreateTemp` / `os.MkdirTemp`)
 
 | Pattern | Purpose | Cleanup |
