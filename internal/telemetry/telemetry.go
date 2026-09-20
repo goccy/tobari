@@ -168,9 +168,18 @@ func parseTraceparent(v string) (traceID, spanID, bool) {
 }
 
 type (
-	recorderKey struct{}
-	spanKey     struct{}
+	recorderKey    struct{}
+	spanKey        struct{}
+	muteMetricsKey struct{}
 )
+
+// MuteMetrics returns a context under which metric points are dropped while
+// spans are still recorded. It is for repeating work whose metrics were
+// already reported, where a second set of points would read as a second
+// measurement of the same thing.
+func MuteMetrics(ctx context.Context) context.Context {
+	return context.WithValue(ctx, muteMetricsKey{}, true)
+}
 
 // WithRecorder returns a context that carries rec.
 func WithRecorder(ctx context.Context, rec *Recorder) context.Context {
@@ -274,6 +283,9 @@ func RecordCount(ctx context.Context, name string, n int, attrs ...Attr) {
 func record(ctx context.Context, name, unit string, value float64, attrs []Attr) {
 	rec := recorderFrom(ctx)
 	if rec == nil {
+		return
+	}
+	if muted, _ := ctx.Value(muteMetricsKey{}).(bool); muted {
 		return
 	}
 	rec.mu.Lock()

@@ -74,6 +74,12 @@ Toolexec Options (used with -toolexec):
                         Record only the blocks that were actually passed
 
 Environment Variables (build time):
+    TOBARI_ANALYSIS     How the dependency analysis treats the dependencies it
+                        learned it can skip (tobari/analysis/learned/):
+                        unset   skip them, and learn more
+                        full    analyze everything, ignoring what was learned
+                        verify  analyze everything and fail the build if the
+                                learned skips would have changed the result
     TOBARI_OTEL_DIR     Absolute path of a directory to write OpenTelemetry traces
                         and metrics of the build to: every tool invocation, the
                         stages of the dependency analysis, and its cost per package

@@ -59,6 +59,7 @@ func TestSummarizeAnalysis(t *testing.T) {
 		// Off-path and above the threshold. std and the unknown module cannot
 		// be named as a prefix; tiny is below the threshold.
 		Candidates: []string{"example.com/gen"},
+		Verified:   []string{},
 	}
 	if diff := cmp.Diff(want, got, cmpopts.EquateApprox(0, 1e-9)); diff != "" {
 		t.Errorf("summary (-want +got):\n%s", diff)
@@ -66,6 +67,50 @@ func TestSummarizeAnalysis(t *testing.T) {
 
 	if got := summarizeAnalysis(testAnalysisReport(), 0).Candidates; !cmp.Equal(got, []string{"example.com/gen", "example.com/tiny"}) {
 		t.Errorf("candidates without a threshold: got %v", got)
+	}
+}
+
+// TestSummarizeAnalysisVerdicts checks how what the build verified about a
+// module shows up: only a module whose analyzed packages all passed is
+// verified, and a module with a package that failed is never a candidate.
+func TestSummarizeAnalysisVerdicts(t *testing.T) {
+	report := &cover.AnalysisReport{
+		Target: "example.com/app",
+		Stages: []cover.AnalysisStage{{Name: "rta", Seconds: 10}},
+		Packages: []*cover.AnalysisPackage{
+			{Package: "example.com/app", Module: "example.com/app", CallEdges: 10, Required: true},
+			{Package: "example.com/verified/a", Module: "example.com/verified", CallEdges: 10, Verdict: cover.VerdictSkip},
+			{Package: "example.com/verified/b", Module: "example.com/verified", CallEdges: 10, Verdict: cover.VerdictSkip},
+			{Package: "example.com/partly/a", Module: "example.com/partly", CallEdges: 10, Verdict: cover.VerdictSkip},
+			{Package: "example.com/partly/b", Module: "example.com/partly", CallEdges: 10},
+			{Package: "example.com/needed/a", Module: "example.com/needed", CallEdges: 10, Verdict: cover.VerdictSkip},
+			{Package: "example.com/needed/b", Module: "example.com/needed", CallEdges: 10, Verdict: cover.VerdictKeep},
+			{Package: "example.com/learned", Module: "example.com/learned", Skipped: true, Learned: true, Verdict: cover.VerdictSkip},
+			{Package: "example.com/excluded", Module: "example.com/excluded", Skipped: true},
+		},
+	}
+	summary := summarizeAnalysis(report, 0)
+
+	roles := make(map[string]moduleRole)
+	for _, m := range summary.Modules {
+		roles[m.Module] = m.Role
+	}
+	wantRoles := map[string]moduleRole{
+		"example.com/app":      roleRequired,
+		"example.com/verified": roleVerified,
+		"example.com/partly":   roleOffPath,
+		"example.com/needed":   roleNeeded,
+		"example.com/learned":  roleLearned,
+		"example.com/excluded": roleSkipped,
+	}
+	if diff := cmp.Diff(wantRoles, roles); diff != "" {
+		t.Errorf("roles (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"example.com/partly", "example.com/verified"}, summary.Candidates); diff != "" {
+		t.Errorf("candidates (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"example.com/verified"}, summary.Verified); diff != "" {
+		t.Errorf("verified (-want +got):\n%s", diff)
 	}
 }
 

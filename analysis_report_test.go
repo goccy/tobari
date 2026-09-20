@@ -16,6 +16,7 @@ import (
 // it back, so extlib is on a call path between coverage targets; strconv is
 // kept out of the analysis by --exclude-analysis.
 func TestAnalysisReport(t *testing.T) {
+	t.Parallel() // see TestBuildTelemetry
 	ctx := t.Context()
 	tobariBin := filepath.Join(t.TempDir(), "tobari")
 	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {

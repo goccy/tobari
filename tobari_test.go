@@ -1096,14 +1096,16 @@ func buildCrosspkgSuppDeps(t *testing.T, ctx context.Context, tobariBin, exclude
 // The cover-package cache lives under the OS temp dir and is shared by every
 // tobari build on the machine, so the build gets a private TMPDIR instead of
 // having the shared cache cleared: clearing it would race with any other
-// tobari build running at the same time, in either direction.
+// tobari build running at the same time, in either direction. The build also
+// gets a private TOBARI_COVERDIR, so that the analysis starts without anything
+// an earlier build learned it can skip.
 func buildCrosspkg(t *testing.T, ctx context.Context, toolexec string) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "app")
 	cmd := exec.CommandContext(ctx, "go", "build",
 		"-cover", "-toolexec="+toolexec, "-o", bin, ".")
 	cmd.Dir = "testdata/crosspkg"
-	cmd.Env = append(os.Environ(), "GOCACHE="+t.TempDir(), "TMPDIR="+t.TempDir())
+	cmd.Env = append(os.Environ(), "GOCACHE="+t.TempDir(), "TMPDIR="+t.TempDir(), "TOBARI_COVERDIR="+t.TempDir())
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build failed: %s: %v", string(out), err)
 	}
@@ -1131,11 +1133,18 @@ func extractSuppDeps(t *testing.T, binPath string) string {
 // possibly absent.
 func findSuppDeps(t *testing.T, binPath string) (string, bool) {
 	t.Helper()
+	return findSuppDepsOf(t, binPath, "example.com/crosspkg")
+}
+
+// findSuppDepsOf finds the suppDeps of the program whose function names
+// contain program.
+func findSuppDepsOf(t *testing.T, binPath, program string) (string, bool) {
+	t.Helper()
 	data, err := os.ReadFile(binPath)
 	if err != nil {
 		t.Fatalf("failed to read binary: %v", err)
 	}
-	// Locate the JSON object whose first key is a crosspkg function.
+	// Locate the JSON object whose first key is a function of the program.
 	marker := []byte(`{"`)
 	for i := 0; i+len(marker) < len(data); i++ {
 		if !bytes.HasPrefix(data[i:], marker) {
@@ -1146,7 +1155,7 @@ func findSuppDeps(t *testing.T, binPath string) (string, bool) {
 			continue
 		}
 		candidate := data[i : i+end+1]
-		if !bytes.Contains(candidate, []byte("example.com/crosspkg")) {
+		if !bytes.Contains(candidate, []byte(program)) {
 			continue
 		}
 		var m map[string][]string

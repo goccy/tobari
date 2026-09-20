@@ -108,6 +108,10 @@ func readTelemetry(t *testing.T, dir string) ([]otlpTestSpan, map[string][]otlpT
 // together with the per-package analysis cost, without changing the analysis
 // result.
 func TestBuildTelemetry(t *testing.T) {
+	// Builds under private caches only, so it can run alongside the other
+	// tests that do; the tests that clear the shared Go build cache are not
+	// parallel and therefore never overlap with it.
+	t.Parallel()
 	ctx := t.Context()
 	tobariBin := filepath.Join(t.TempDir(), "tobari")
 	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
@@ -125,6 +129,9 @@ func TestBuildTelemetry(t *testing.T) {
 		// The trace must not depend on what the environment running the
 		// tests happens to propagate.
 		"TRACEPARENT=",
+		// Nor may the analysis depend on what an earlier build of the
+		// testdata learned it can skip.
+		"TOBARI_COVERDIR="+t.TempDir(),
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build failed: %s: %v", string(out), err)
@@ -183,7 +190,9 @@ func TestBuildTelemetry(t *testing.T) {
 		}
 		var stages []string
 		for _, span := range spans {
-			if span.ParentSpanID == analysis[0].SpanID {
+			// Learning which dependencies can be skipped is not a stage every
+			// analysis has: it runs only when there is enough to gain.
+			if span.ParentSpanID == analysis[0].SpanID && span.Name != "tobari.analysis.learn" {
 				stages = append(stages, span.Name)
 			}
 		}
@@ -231,6 +240,7 @@ func TestBuildTelemetry(t *testing.T) {
 // --exclude-analysis keeps out of the analysis are reported as skipped and are
 // not reported as built.
 func TestBuildTelemetryReportsSkippedPackages(t *testing.T) {
+	t.Parallel() // see TestBuildTelemetry
 	ctx := t.Context()
 	tobariBin := filepath.Join(t.TempDir(), "tobari")
 	if out, err := exec.CommandContext(ctx, "go", "build", "-o", tobariBin, "./cmd/tobari").CombinedOutput(); err != nil {
@@ -247,6 +257,7 @@ func TestBuildTelemetryReportsSkippedPackages(t *testing.T) {
 		"TMPDIR="+t.TempDir(),
 		"TOBARI_OTEL_DIR="+otelDir,
 		"TRACEPARENT=",
+		"TOBARI_COVERDIR="+t.TempDir(),
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build failed: %s: %v", string(out), err)

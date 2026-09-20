@@ -362,9 +362,11 @@ func CreateMainDeps(ctx context.Context, target string, mainSourceFiles []string
 	if loaded == nil {
 		return nil, nil
 	}
-	suppDeps := analyze(ctx, rec, loaded, func(ssaPkg *ssa.Package) bool {
-		return !isMainPkg(ssaPkg) && isExcludedFromAnalysis(ssaPkg.Pkg.Path(), excludeAnalysis, loaded.coverPkgSet)
-	})
+	suppDeps, err := analyzeLearning(ctx, rec, loaded, target, excludeAnalysis)
+	if err != nil {
+		span.Fail(err)
+		return nil, err
+	}
 	if target != "" {
 		// The report is a by-product. A source tree that cannot be written to
 		// (a read-only mount, the module cache) must not fail a build that
@@ -390,6 +392,83 @@ type loadedProgram struct {
 	// library. Packages go list does not report, such as a synthesized test
 	// main, are absent.
 	modules map[string]string
+	// listed holds what go list reports about each package, by import path.
+	listed map[string]*listedPackage
+}
+
+// listedPackage is the part of a `go list -json` entry the analysis uses.
+type listedPackage struct {
+	Dir        string
+	ImportPath string
+	Standard   bool
+	GoFiles    []string
+	Module     *listedModule
+}
+
+type listedModule struct {
+	Path    string
+	Version string
+	Replace *listedModule
+}
+
+// immutableVersion returns the version that pins the package's source: the Go
+// release for the standard library (represented by stdModule, since the Go
+// version is tracked separately) or the version of the module providing it.
+// A package of the main module, of a workspace module, or of a module
+// replaced by a directory has no version and can change between any two
+// builds.
+func (p *listedPackage) immutableVersion() (string, bool) {
+	if p.Standard {
+		return stdModule, true
+	}
+	if p.Module == nil {
+		return "", false
+	}
+	module := p.Module
+	if module.Replace != nil {
+		module = module.Replace
+	}
+	if module.Version == "" {
+		return "", false
+	}
+	return module.Path + "@" + module.Version, true
+}
+
+func (p *listedPackage) immutable() bool {
+	_, ok := p.immutableVersion()
+	return ok
+}
+
+// skipPolicy decides which packages the analysis leaves without function
+// bodies. It is only asked about packages that have a types.Package.
+type skipPolicy struct {
+	// fixed reports a package to leave out. It must not report a package
+	// isRequiredPkg holds for.
+	fixed func(*ssa.Package) bool
+	// learned, when set, is called once with the boundaries of the inside
+	// packages, before any other package is built, and returns the import
+	// paths of further packages to leave out. Inside packages among them are
+	// ignored; see isInsidePkg.
+	learned func(boundaries) map[string]struct{}
+}
+
+// isInsidePkg reports whether a package is code under development rather than
+// a dependency: a coverage target, a main/test package, or any other package
+// without an immutable version. Inside packages are always analyzed, and how
+// they use the other packages is what boundaries describe.
+func isInsidePkg(ssaPkg *ssa.Package, loaded *loadedProgram) bool {
+	if isRequiredPkg(ssaPkg, loaded.coverPkgSet) {
+		return true
+	}
+	listed := loaded.listed[ssaPkg.Pkg.Path()]
+	return listed == nil || !listed.immutable()
+}
+
+// isRequiredPkg reports whether the analysis exists to measure the package: a
+// coverage target or a main/test package.
+func isRequiredPkg(ssaPkg *ssa.Package, coverPkgSet map[string]struct{}) bool {
+	pkgPath := ssaPkg.Pkg.Path()
+	return isMainPkg(ssaPkg) || isMainOrTestPkg(pkgPath) || matchCoverPkg(pkgPath, coverPkgSet) != ""
 }
 
 // stdModule is the module name reported for standard library packages, which
@@ -501,23 +580,23 @@ func loadProgram(ctx context.Context, rec *analysisRecorder, mainSourceFiles []s
 
 	endLoad(telemetry.Int("tobari.analysis.packages", len(allDepPaths)))
 
-	return &loadedProgram{dir: dir, pkgs: pkgs, coverPkgSet: coverPkgSet, modules: coverResult.modules}, nil
+	return &loadedProgram{dir: dir, pkgs: pkgs, coverPkgSet: coverPkgSet, modules: coverResult.modules, listed: coverResult.listed}, nil
 }
 
 // analyze runs the whole-program call graph analysis over a loaded program and
 // returns the dependency map of its coverage-target functions.
 //
-// skip reports the packages whose SSA bodies are not built; see the
+// policy decides the packages whose SSA bodies are not built; see the
 // excludeAnalysis parameter of CreateMainDeps for what that means for the
-// result. It is only asked about packages that have a types.Package.
-func analyze(ctx context.Context, rec *analysisRecorder, loaded *loadedProgram, skip func(*ssa.Package) bool) map[string][]string {
+// result. The boundaries are returned when the policy asked for them.
+func analyze(ctx context.Context, rec *analysisRecorder, loaded *loadedProgram, policy skipPolicy) (map[string][]string, boundaries) {
 	coverPkgSet := loaded.coverPkgSet
 
 	_, endCreate := rec.stage(ctx, "ssa_create")
 	prog, _ := ssautil.AllPackages(loaded.pkgs, ssa.InstantiateGenerics)
 	endCreate()
 
-	buildSSA(ctx, rec, prog, loaded, skip)
+	current := buildSSA(ctx, rec, prog, loaded, policy)
 
 	// Collect RTA roots from main/test packages and cover-target packages.
 	//
@@ -568,7 +647,7 @@ func analyze(ctx context.Context, rec *analysisRecorder, loaded *loadedProgram, 
 	// so no supplementary deps can be produced. Treat this as a no-op rather
 	// than a hard error — the build should still succeed.
 	if len(roots) == 0 {
-		return nil
+		return nil, current
 	}
 
 	_, endRTA := rec.stage(ctx, "rta", telemetry.Int("tobari.analysis.roots", len(roots)))
@@ -650,7 +729,7 @@ func analyze(ctx context.Context, rec *analysisRecorder, loaded *loadedProgram, 
 	}
 
 	endDeps(telemetry.Int("tobari.analysis.cover_functions", len(suppDeps)))
-	return suppDeps
+	return suppDeps, current
 }
 
 // followEdge reports whether a call edge from the RTA graph should be
@@ -856,27 +935,25 @@ type coverPkgSetResult struct {
 	pkgSet map[string]struct{}
 	// modules maps every listed package to its module; see loadedProgram.
 	modules map[string]string
+	// listed holds every listed package by import path.
+	listed map[string]*listedPackage
 }
 
 // buildCoverPkgSet parses go list JSON output and checks the global cache
 // to determine which packages are coverage targets.
 func buildCoverPkgSet(goListJSON []byte) (*coverPkgSetResult, error) {
-	type goListPkg struct {
-		Dir        string
-		ImportPath string
-		Standard   bool
-		Module     *struct{ Path string }
-	}
 	result := &coverPkgSetResult{
 		pkgSet:  make(map[string]struct{}),
 		modules: make(map[string]string),
+		listed:  make(map[string]*listedPackage),
 	}
 	decoder := json.NewDecoder(bytes.NewReader(goListJSON))
 	for decoder.More() {
-		var pkg goListPkg
+		var pkg listedPackage
 		if err := decoder.Decode(&pkg); err != nil {
 			return nil, fmt.Errorf("failed to decode go list entry: %w", err)
 		}
+		result.listed[pkg.ImportPath] = &pkg
 		if cache := lookupCoverPkgByDir(pkg.Dir); cache != nil {
 			result.pkgSet[cache.PkgPath] = struct{}{}
 		}

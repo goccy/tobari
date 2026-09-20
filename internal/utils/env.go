@@ -8,6 +8,10 @@ const (
 	// AnalysisReportDirName is the subdirectory of CoverOutputDirName holding
 	// the analysis report of every analyzed target.
 	AnalysisReportDirName = "analysis"
+
+	// AnalysisLearnedDirName is the subdirectory of AnalysisReportDirName
+	// holding, per target, the packages the analysis learned it can skip.
+	AnalysisLearnedDirName = "learned"
 )
 
 // Environment variable names read by tobari processes.
