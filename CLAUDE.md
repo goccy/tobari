@@ -52,7 +52,8 @@ Written by the cover tool after each whole-program analysis, next to the coverag
 
 | File | Writer | Reader | Purpose |
 |---|---|---|---|
-| `<url-path-escaped target import path>.json` | cover tool | `tobari analysis` | Stage durations and, per package, SSA build time, call graph share, and role (required / on-path / skipped) |
+| `<url-path-escaped target import path>.json` | cover tool | `tobari analysis` | Stage durations and, per package, SSA build time, call graph share, role (required / on-path / skipped) and verification verdict |
+| `learned/<url-path-escaped target import path>.json` | cover tool | cover tool (next analysis of the target) | Learned skips: per-package verdicts (`skip` / `keep`), the boundary fingerprints they were learned under, and a context hash (dependency versions, coverage targets, `--exclude-analysis`, tobari and Go versions). Deterministic and free of absolute paths, so it can be committed. Ignored with `TOBARI_ANALYSIS=full`; checked and, if disproved, deleted with `TOBARI_ANALYSIS=verify` |
 
 ### Ephemeral temp files (`os.CreateTemp` / `os.MkdirTemp`)
 

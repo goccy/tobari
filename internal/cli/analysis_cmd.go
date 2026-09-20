@@ -29,6 +29,9 @@ type analysisSummary struct {
 	// Candidates lists the modules worth trying in --exclude-analysis, most
 	// expensive first.
 	Candidates []string `json:"candidates"`
+	// Verified lists the candidates the build verified: repeating the
+	// analysis without them gave the same result.
+	Verified []string `json:"verified"`
 }
 
 // moduleSummary sums up the packages of one module.
@@ -59,23 +62,24 @@ const (
 	// roleOnPath: a call path between coverage targets runs through the
 	// module, so excluding it would lose dependencies.
 	roleOnPath moduleRole = "on-path"
-	// roleSkipped: every package of the module was already left out.
+	// roleSkipped: every package of the module was already left out by
+	// --exclude-analysis.
 	roleSkipped moduleRole = "skipped"
+	// roleLearned: every package of the module was left out, at least one of
+	// them because an earlier build verified that it does not change the
+	// result.
+	roleLearned moduleRole = "skipped (learned)"
 	// roleOffPath: analyzed, and no call path between coverage targets runs
 	// through it.
 	roleOffPath moduleRole = "off-path"
+	// roleVerified: off-path, and repeating the analysis without the module
+	// gave the same result.
+	roleVerified moduleRole = "off-path (verified)"
+	// roleNeeded: off-path, but repeating the analysis without the module
+	// changed the result: it carries values the analysis has to follow, say,
+	// or makes coverage-target functions reachable in the first place.
+	roleNeeded moduleRole = "needed"
 )
-
-// Stages whose time scales with the call graph rather than with source size.
-var callGraphStages = map[string]struct{}{
-	"rta":                {},
-	"vta":                {},
-	"followable_callees": {},
-	"frontiers":          {},
-	"dependencies":       {},
-}
-
-const ssaBuildStage = "ssa_build"
 
 // unknownModule groups the packages go list did not report, such as the
 // synthesized test main.
@@ -91,24 +95,19 @@ const stdModule = "std"
 func summarizeAnalysis(report *cover.AnalysisReport, minShare float64) *analysisSummary {
 	summary := &analysisSummary{Target: report.Target, Stages: report.Stages}
 
-	var ssaStageSeconds, callGraphSeconds float64
 	for _, stage := range report.Stages {
 		summary.Seconds += stage.Seconds
-		if stage.Name == ssaBuildStage {
-			ssaStageSeconds = stage.Seconds
-		}
-		if _, ok := callGraphStages[stage.Name]; ok {
-			callGraphSeconds += stage.Seconds
-		}
 	}
+	estimated, attributable := report.EstimatedSeconds()
 
 	type moduleState struct {
-		summary                   *moduleSummary
-		required, onPath, skipped bool
+		summary                            *moduleSummary
+		required, onPath, skipped, learned bool
+		// needed is set when any package has the keep verdict, verified while
+		// every analyzed package has the skip verdict.
+		needed, verified bool
 	}
 	modules := make(map[string]*moduleState)
-	var totalSSASeconds float64
-	var totalEdges int
 	for _, pkg := range report.Packages {
 		name := pkg.Module
 		if name == "" {
@@ -116,7 +115,7 @@ func summarizeAnalysis(report *cover.AnalysisReport, minShare float64) *analysis
 		}
 		m := modules[name]
 		if m == nil {
-			m = &moduleState{summary: &moduleSummary{Module: name}, skipped: true}
+			m = &moduleState{summary: &moduleSummary{Module: name}, skipped: true, verified: true}
 			modules[name] = m
 		}
 		m.summary.Packages++
@@ -126,8 +125,10 @@ func summarizeAnalysis(report *cover.AnalysisReport, minShare float64) *analysis
 		m.required = m.required || pkg.Required
 		m.onPath = m.onPath || pkg.OnPath
 		m.skipped = m.skipped && pkg.Skipped
-		totalSSASeconds += pkg.SSABuildSeconds
-		totalEdges += pkg.CallEdges
+		m.learned = m.learned || pkg.Learned
+		m.needed = m.needed || pkg.Verdict == cover.VerdictKeep
+		m.verified = m.verified && (pkg.Skipped || pkg.Verdict == cover.VerdictSkip)
+		m.summary.EstimatedSeconds += estimated[pkg.Package]
 	}
 
 	for _, m := range modules {
@@ -136,18 +137,18 @@ func summarizeAnalysis(report *cover.AnalysisReport, minShare float64) *analysis
 			m.summary.Role = roleRequired
 		case m.onPath:
 			m.summary.Role = roleOnPath
+		case m.skipped && m.learned:
+			m.summary.Role = roleLearned
 		case m.skipped:
 			m.summary.Role = roleSkipped
+		case m.needed:
+			m.summary.Role = roleNeeded
+		case m.verified:
+			m.summary.Role = roleVerified
 		default:
 			m.summary.Role = roleOffPath
 		}
-		if totalSSASeconds > 0 {
-			m.summary.EstimatedSeconds += ssaStageSeconds * m.summary.SSABuildSeconds / totalSSASeconds
-		}
-		if totalEdges > 0 {
-			m.summary.EstimatedSeconds += callGraphSeconds * float64(m.summary.CallEdges) / float64(totalEdges)
-		}
-		if attributable := ssaStageSeconds + callGraphSeconds; attributable > 0 {
+		if attributable > 0 {
 			m.summary.Share = m.summary.EstimatedSeconds / attributable
 		}
 		summary.Modules = append(summary.Modules, m.summary)
@@ -161,12 +162,17 @@ func summarizeAnalysis(report *cover.AnalysisReport, minShare float64) *analysis
 	})
 
 	summary.Candidates = []string{}
+	summary.Verified = []string{}
 	for _, m := range summary.Modules {
-		if m.Role != roleOffPath || m.Module == stdModule || m.Module == unknownModule {
+		if (m.Role != roleOffPath && m.Role != roleVerified) || m.Module == stdModule || m.Module == unknownModule {
 			continue
 		}
-		if m.Share >= minShare {
-			summary.Candidates = append(summary.Candidates, m.Module)
+		if m.Share < minShare {
+			continue
+		}
+		summary.Candidates = append(summary.Candidates, m.Module)
+		if m.Role == roleVerified {
+			summary.Verified = append(summary.Verified, m.Module)
 		}
 	}
 	return summary
@@ -282,6 +288,15 @@ func (c *CLI) printAnalysisSummary(summary *analysisSummary) error {
 
 	if len(summary.Candidates) == 0 {
 		_, err := fmt.Fprintln(c.stdout, "\n  No module is both expensive and off every call path between coverage targets.")
+		return err
+	}
+	if len(summary.Verified) == len(summary.Candidates) {
+		_, err := fmt.Fprintf(c.stdout, `
+  Repeating the analysis without these modules gave the same result, and tobari
+  leaves them out by itself from the next build on. To exclude them for good:
+
+    -exclude-analysis=%s
+`, strings.Join(summary.Candidates, ","))
 		return err
 	}
 	_, err := fmt.Fprintf(c.stdout, `

@@ -32,8 +32,12 @@ func packageAttrs(loaded *loadedProgram, pkgPath string) []telemetry.Attr {
 	}
 }
 
-// buildSSA builds the function bodies of every package skip does not reject.
-// A skipped package stays bodyless, so RTA cannot trace calls through it.
+// buildSSA builds the function bodies of every package the policy does not
+// leave out. A package left out stays bodyless, so RTA cannot trace calls
+// through it.
+//
+// The inside packages are built first: the policy may need their boundaries to
+// decide about the others. The boundaries are returned if it asked for them.
 //
 // Packages are built concurrently, as ssa.Program.Build does, but one by one
 // rather than through that method so that each build can be timed. The time
@@ -41,29 +45,68 @@ func packageAttrs(loaded *loadedProgram, pkgPath string) []telemetry.Attr {
 // includes the generic instantiations the package is the first to demand, so
 // it ranks packages against each other rather than measuring them in
 // isolation.
-func buildSSA(ctx context.Context, rec *analysisRecorder, prog *ssa.Program, loaded *loadedProgram, skip func(*ssa.Package) bool) {
+func buildSSA(ctx context.Context, rec *analysisRecorder, prog *ssa.Program, loaded *loadedProgram, policy skipPolicy) boundaries {
 	ctx, end := rec.stage(ctx, "ssa_build")
 
-	var targets []*ssa.Package
 	skipped := 0
-	for _, ssaPkg := range prog.AllPackages() {
-		if ssaPkg.Pkg == nil {
-			targets = append(targets, ssaPkg)
-			continue
-		}
+	skip := func(ssaPkg *ssa.Package, isLearned bool) {
+		skipped++
 		pkgPath := ssaPkg.Pkg.Path()
-		isSkipped := skip(ssaPkg)
 		rec.update(loaded, pkgPath, func(pkg *AnalysisPackage) {
-			pkg.Skipped = isSkipped
-			pkg.Required = isMainPkg(ssaPkg) || isMainOrTestPkg(pkgPath) || matchCoverPkg(pkgPath, loaded.coverPkgSet) != ""
+			pkg.Skipped = true
+			pkg.Learned = isLearned
 		})
-		if isSkipped {
-			skipped++
-			telemetry.RecordCount(ctx, metricSkipped, 1, packageAttrs(loaded, pkgPath)...)
+		telemetry.RecordCount(ctx, metricSkipped, 1, append(packageAttrs(loaded, pkgPath), telemetry.Bool("tobari.learned", isLearned))...)
+	}
+
+	var inside, outside []*ssa.Package
+	for _, ssaPkg := range prog.AllPackages() {
+		switch {
+		case ssaPkg.Pkg == nil:
+			inside = append(inside, ssaPkg)
+		case policy.fixed(ssaPkg):
+			skip(ssaPkg, false)
+		case isInsidePkg(ssaPkg, loaded):
+			inside = append(inside, ssaPkg)
+		default:
+			outside = append(outside, ssaPkg)
+		}
+	}
+	buildSSAPackages(ctx, rec, loaded, inside)
+
+	var (
+		current boundaries
+		learned map[string]struct{}
+	)
+	if policy.learned != nil {
+		insidePkgs := make([]*ssa.Package, 0, len(inside))
+		for _, ssaPkg := range inside {
+			if ssaPkg.Pkg != nil {
+				insidePkgs = append(insidePkgs, ssaPkg)
+			}
+		}
+		current = computeBoundaries(prog, insidePkgs)
+		learned = policy.learned(current)
+	}
+
+	var targets []*ssa.Package
+	for _, ssaPkg := range outside {
+		if _, isLearned := learned[ssaPkg.Pkg.Path()]; isLearned {
+			skip(ssaPkg, true)
 			continue
 		}
 		targets = append(targets, ssaPkg)
 	}
+	buildSSAPackages(ctx, rec, loaded, targets)
+
+	end(
+		telemetry.Int("tobari.analysis.built_packages", len(inside)+len(targets)),
+		telemetry.Int("tobari.analysis.skipped_packages", skipped),
+	)
+	return current
+}
+
+func buildSSAPackages(ctx context.Context, rec *analysisRecorder, loaded *loadedProgram, targets []*ssa.Package) {
 	sort.Slice(targets, func(i, j int) bool {
 		return ssaPkgPath(targets[i]) < ssaPkgPath(targets[j])
 	})
@@ -86,6 +129,7 @@ func buildSSA(ctx context.Context, rec *analysisRecorder, prog *ssa.Program, loa
 				if ssaPkg.Pkg != nil {
 					rec.update(loaded, pkgPath, func(pkg *AnalysisPackage) {
 						pkg.SSABuildSeconds = elapsed.Seconds()
+						pkg.Required = isRequiredPkg(ssaPkg, loaded.coverPkgSet)
 					})
 				}
 			}
@@ -96,11 +140,6 @@ func buildSSA(ctx context.Context, rec *analysisRecorder, prog *ssa.Program, loa
 	}
 	close(queue)
 	wg.Wait()
-
-	end(
-		telemetry.Int("tobari.analysis.built_packages", len(targets)),
-		telemetry.Int("tobari.analysis.skipped_packages", skipped),
-	)
 }
 
 // recordReachability reports, per package, how many of its functions the RTA

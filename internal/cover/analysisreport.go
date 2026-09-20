@@ -53,6 +53,14 @@ type AnalysisPackage struct {
 	// Skipped is set when the package's function bodies were left out of the
 	// analysis.
 	Skipped bool `json:"skipped,omitempty"`
+	// Learned is set on a skipped package that was left out because an
+	// earlier build verified that doing so does not change the result, rather
+	// than because --exclude-analysis names it.
+	Learned bool `json:"learned,omitempty"`
+	// Verdict is what repeating the analysis without the package showed:
+	// VerdictSkip when the result stayed the same, VerdictKeep when it
+	// changed. It is empty for a package that was never put to the test.
+	Verdict SkipVerdict `json:"verdict,omitempty"`
 	// OnPath is set when a call path from one coverage-target function to
 	// another runs through a function of this package, which makes the
 	// package part of the computed dependencies: leaving it out would lose
@@ -61,6 +69,66 @@ type AnalysisPackage struct {
 	// because a package can also matter by carrying a value from one place
 	// to another without being called in between.
 	OnPath bool `json:"onPath,omitempty"`
+}
+
+// SkipVerdict is the outcome of verifying that a package can be left out of
+// the analysis.
+type SkipVerdict string
+
+const (
+	// VerdictSkip: leaving the package out was verified not to change the
+	// result.
+	VerdictSkip SkipVerdict = "skip"
+	// VerdictKeep: leaving the package out changed the result, so it is not
+	// tried again while the record holds.
+	VerdictKeep SkipVerdict = "keep"
+)
+
+// Stages whose time scales with the call graph rather than with source size.
+var callGraphStages = map[string]struct{}{
+	"rta":                {},
+	"vta":                {},
+	"followable_callees": {},
+	"frontiers":          {},
+	"dependencies":       {},
+}
+
+const ssaBuildStage = "ssa_build"
+
+// EstimatedSeconds splits the analysis time that depends on the packages
+// analyzed among them, and also returns that time as a whole.
+//
+// Only the SSA build is measured per package, and under concurrency, so the
+// duration of the SSA build stage is split by those measurements. The call
+// graph stages are whole-program computations; their time is split by each
+// package's share of the call edges. The result ranks packages. It is not a
+// measurement.
+func (r *AnalysisReport) EstimatedSeconds() (map[string]float64, float64) {
+	var ssaStageSeconds, callGraphSeconds float64
+	for _, stage := range r.Stages {
+		if stage.Name == ssaBuildStage {
+			ssaStageSeconds += stage.Seconds
+		}
+		if _, ok := callGraphStages[stage.Name]; ok {
+			callGraphSeconds += stage.Seconds
+		}
+	}
+	var totalSSASeconds float64
+	var totalEdges int
+	for _, pkg := range r.Packages {
+		totalSSASeconds += pkg.SSABuildSeconds
+		totalEdges += pkg.CallEdges
+	}
+	seconds := make(map[string]float64, len(r.Packages))
+	for _, pkg := range r.Packages {
+		if totalSSASeconds > 0 {
+			seconds[pkg.Package] += ssaStageSeconds * pkg.SSABuildSeconds / totalSSASeconds
+		}
+		if totalEdges > 0 {
+			seconds[pkg.Package] += callGraphSeconds * float64(pkg.CallEdges) / float64(totalEdges)
+		}
+	}
+	return seconds, ssaStageSeconds + callGraphSeconds
 }
 
 // analysisRecorder accumulates an AnalysisReport while the analysis runs.

@@ -169,6 +169,7 @@ under that span, which lets a CI pipeline that is itself traced include it.
 | `tobari.analysis` | One whole-program dependency analysis: once per main package, once per test binary |
 | `tobari.analysis.go_list`, `.load`, `.ssa_create`, `.ssa_build`, `.rta`, `.vta`, `.followable_callees`, `.frontiers`, `.dependencies` | The stages of the analysis, in order |
 | `tobari.analysis.ssa_build.package` | The SSA build of one package |
+| `tobari.analysis.learn`, `tobari.analysis.verify` | Learning which dependencies can be skipped: each `verify` is one repeated, reduced analysis, with `tobari.analysis.same_result` telling how it went. See [Learned Skips](#learned-skips) |
 
 **Metrics.** Each analysis reports one point per package, attributed with
 `tobari.package` and with `tobari.module`, the module providing the package
@@ -179,7 +180,7 @@ under that span, which lets a CI pipeline that is itself traced include it.
 | `tobari.analysis.package.ssa_build.duration` | Seconds spent building the package's SSA form. Packages are built concurrently and a package pays for the generic instantiations it is the first to need, so use it to rank packages rather than as an exact cost |
 | `tobari.analysis.package.reachable_functions` | Number of the package's functions in the call graph |
 | `tobari.analysis.package.call_edges` | Number of call edges leaving those functions |
-| `tobari.analysis.package.skipped` | Reported for each package `--exclude-analysis` kept out of the analysis |
+| `tobari.analysis.package.skipped` | Reported for each package kept out of the analysis. `tobari.learned` tells whether `--exclude-analysis` (`false`) or a [learned skip](#learned-skips) (`true`) did it |
 | `tobari.analysis.package.on_path` | Reported for each package that a call path between two coverage-target functions runs through |
 
 The call graph stages (`rta`, `vta`) are whole-program computations whose time
@@ -225,15 +226,19 @@ example.com/app
 | `required` | Holds a coverage target or the main package. Never excluded |
 | `on-path` | A call path from one coverage-target function to another runs through it (for example, it calls a callback you passed in). Excluding it would lose those dependencies |
 | `off-path` | Analyzed, but no such path ran through it in this build |
-| `skipped` | Already kept out of the analysis by `--exclude-analysis` |
+| `off-path (verified)` | Off-path, and repeating the analysis without it gave the same result. tobari leaves it out by itself from the next build on; see [Learned Skips](#learned-skips) |
+| `needed` | Off-path, but repeating the analysis without it changed the result. The analysis needs its function bodies for another reason than a call path: it carries values of your code from one place to another, for example, or it is what makes functions of your code reachable at all. Do not exclude it |
+| `skipped` | Kept out of the analysis by `--exclude-analysis` |
+| `skipped (learned)` | Kept out of the analysis because an earlier build verified that it can be |
 
 `EST. TIME` is an estimate made for ranking, not a measurement: only the SSA build
 is timed per package, and the time of the whole-program call graph stages is
 split by each module's share of the call edges.
 
-The printed `-exclude-analysis=` value lists the `off-path` modules whose share is
-at least `-min-share` percent (default 1). It is a suggestion to review, not a
-verdict: see the correctness requirement of `--exclude-analysis` below.
+The printed `-exclude-analysis=` value lists the `off-path` modules, verified or
+not, whose share is at least `-min-share` percent (default 1). For modules that
+are not verified it is a suggestion to review, not a verdict: see the correctness
+requirement of `--exclude-analysis` below.
 
 The reports are written to `tobari/analysis/` next to the coverage results: in the
 directory of the analyzed main package (or of the package under test), or under
@@ -242,6 +247,71 @@ directory of the analyzed main package (or of the package under test), or under
 them, so after `go test ./...` a single `tobari analysis` at the module root
 shows every test binary. A build served from Go's build cache runs no analysis
 and leaves the previous report in place.
+
+### Learned Skips
+
+You do not have to maintain an `--exclude-analysis` list for the analysis to get
+faster. After analyzing a target, tobari repeats the analysis without the
+dependencies that no call path between coverage targets ran through. If the
+result is identical, leaving them out provably changes nothing for this
+program; tobari records that, and **the next analysis of the same target skips
+them**. A dependency whose removal changes the result is recorded as needed and
+not tried again.
+
+The first build of a target therefore takes longer; later builds get the benefit.
+Verifying is only attempted when the candidates account for at least 10% of the
+analysis time, and it is given about as long as the analysis itself took (or 30
+seconds, if that is longer) before tobari settles for what it has verified so
+far and leaves the rest to a later build.
+
+When leaving all candidates out at once changes the result, tobari halves the set
+and tries again, down to the single packages that are needed, so one such package
+does not keep the rest from being skipped.
+
+Only packages whose source is pinned are ever left out: the standard library and
+modules with a version (including vendored ones). Your own packages and modules
+replaced by a local directory can change between any two builds and are always
+analyzed.
+
+What was learned is kept in `tobari/analysis/learned/`, next to the analysis
+reports, and is used only as long as it is known to hold:
+
+- It is discarded as a whole when the version of any dependency, the set of
+  coverage targets, the `--exclude-analysis` list, tobari, or Go changes.
+- It is re-examined per dependency when your code changes. tobari fingerprints
+  *how* your code uses each dependency: which of its functions, methods,
+  variables and struct fields are used from which of your functions, and what is
+  handed over — the concrete type of a value converted to an interface, the name
+  of a function passed as a callback. Editing function bodies does not change
+  that, so the learned skips stay in effect. When the use of a dependency `B`
+  does change — you call a new API, pass a different type, use it from another
+  function — `B` and every package `B` imports are analyzed again, and only
+  those.
+
+One kind of change is out of reach of the fingerprint: your code hands a callback
+to package `C`, and a skipped package `B` that does not import `C` ends up
+running it. Neither the use of `B` nor of anything `B` imports changed. For the
+same reason `--exclude-analysis` has a correctness requirement, check the learned
+skips against a full analysis now and then, for example in a nightly job:
+
+```console
+# Analyze in full and fail the build if the learned skips would have changed the result
+TOBARI_ANALYSIS=verify GOCACHE=$(mktemp -d) GOFLAGS="$(tobari flags)" go build .
+
+# Analyze in full, ignoring what was learned
+TOBARI_ANALYSIS=full GOFLAGS="$(tobari flags)" go build .
+```
+
+`verify` discards learned skips it disproves, so the next build learns afresh.
+Learned skips never change the build cache key: they are only applied when they
+leave the result as it is.
+
+The files in `tobari/analysis/learned/` contain no absolute paths or timings, so
+they can be committed to share what was learned with machines that build the same
+way: the record is tied to the Go version and to the source files the build
+selects, which differ between operating systems and architectures, and a build
+it does not match replaces it. If you commit them, add `tobari/analysis/*.json`
+to `.gitignore`, since the reports next to them change with every build.
 
 ### Speeding Up the Dependency Analysis
 
@@ -929,6 +999,7 @@ Show help message with all commands and options.
 | Variable | Description |
 |----------|-------------|
 | `TOBARI_COVERDIR` | Directory for coverage output files (default: current directory). At build time, also the directory the analysis reports read by `tobari analysis` are written under (default: the directory of the analyzed package) |
+| `TOBARI_ANALYSIS` | Build time only. `full`: analyze every dependency, ignoring the [learned skips](#learned-skips). `verify`: analyze in full and fail the build if the learned skips would have changed the result (default: use and update the learned skips) |
 | `TOBARI_OTEL_DIR` | Build time only. Absolute path of the directory to write OpenTelemetry traces and metrics of the build to (default: disabled). See [Finding Out Where the Build Time Goes](#finding-out-where-the-build-time-goes) |
 
 # License
