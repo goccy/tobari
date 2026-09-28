@@ -260,7 +260,10 @@ func %[2]s_GID() uint64
 func %[2]s_PGID() uint64
 
 //go:linkname %[2]s_Trace github.com/goccy/tobari/internal/tobari.Trace
-func %[2]s_Trace(string, uint64, uint64, int, int, int, int, int, int)
+func %[2]s_Trace(int32, uint64, uint64, int)
+
+//go:linkname %[2]s_RegisterFile github.com/goccy/tobari/internal/tobari.RegisterFile
+func %[2]s_RegisterFile(string, int) int32
 
 //go:linkname %[2]s_SetGIDFunc github.com/goccy/tobari/internal/tobari.SetGIDFunc
 func %[2]s_SetGIDFunc(func() uint64) bool
@@ -435,6 +438,16 @@ type File struct {
 	commClauseCommPos   map[token.Pos]struct{} // positions of CommClause.Comm send/recv to skip wrapping
 	selectInstrumented  map[token.Pos]struct{}
 	selectTokenIdx      int
+	fileIDVar           string
+}
+
+// fileIDVarName derives the name of the package-level variable that holds this
+// file's registered id. It comes from a hash of the path rather than from the
+// base name, because the variable shares a namespace with every other file of
+// the package and two directories can hold files with the same base name.
+func fileIDVarName(path string) string {
+	sum := sha256.Sum256([]byte(path))
+	return fmt.Sprintf("%s_fileID_%x", tobariPkg, sum[:8])
 }
 
 func (f *File) nextBlockIndex() int {
@@ -499,6 +512,7 @@ func addTracePointWithContent(pkgcfg *PackageConfig, dep *FunctionDependency, fi
 		commClauseCommPos:   collectCommClauseCommPos(parsedFile),
 		selectInstrumented:  make(map[token.Pos]struct{}),
 		selectTokenIdx:      1,
+		fileIDVar:           fileIDVarName(filename),
 	}
 
 	// Walk the AST and instrument code
@@ -521,8 +535,9 @@ func (f *File) renderFooter() (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf(`
-var _ = %s_AddCoverMeta(%q)
-`, tobariPkg, md), nil
+var _ = %[1]s_AddCoverMeta(%[2]q)
+var %[3]s = %[1]s_RegisterFile(%[4]q, %[5]d)
+`, tobariPkg, md, f.fileIDVar, f.name, f.nextBlockIndex()), nil
 }
 
 func (f *File) renderMetadata() (string, error) {
@@ -995,15 +1010,12 @@ func (f *File) newCounter(start, end token.Pos, numStmt int) string {
 	// Generate both standard coverage call and our custom call
 	// This ensures compatibility with Go's coverage runtime while adding our functionality.
 	stmt := fmt.Sprintf(
-		"%s_Trace(%q, %s_PGID(), %s_GID(), %d, %d, %d, %d, %d, %d)",
+		"%s_Trace(%s, %s_PGID(), %s_GID(), %d)",
 		tobariPkg,
-		f.name,
+		f.fileIDVar,
 		tobariPkg,
 		tobariPkg,
 		blockIndex,
-		stpos.Line, enpos.Line,
-		stpos.Column, enpos.Column,
-		numStmt,
 	)
 	f.curFunc.addBlock(&tobari.Block{
 		Idx: blockIndex,

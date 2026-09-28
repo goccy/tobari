@@ -62,7 +62,7 @@ func setupTestCoverMeta(t *testing.T) *TraceEntry {
 	})
 
 	root := newTraceG(1)
-	root.addCounter(blockID(testFileName, 0))
+	root.addCounter(RegisterFile(testFileName, testFuncNum), 0)
 	return &TraceEntry{Name: "dep-resolution", Roots: []*TraceG{root}}
 }
 
@@ -158,7 +158,7 @@ func TestCoverprofileMapPassedBlocksOnly(t *testing.T) {
 func TestMarshalCoverPassedBlocksOnly(t *testing.T) {
 	setupTestCoverMeta(t)
 	root := newTraceG(2)
-	root.addCounter(blockID(testFileName, 1))
+	root.addCounter(RegisterFile(testFileName, testFuncNum), 1)
 	setEntry("marshal-passed-blocks-only", &TraceEntry{Name: "marshal-passed-blocks-only", Roots: []*TraceG{root}})
 
 	type report struct {
