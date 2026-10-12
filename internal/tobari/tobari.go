@@ -30,6 +30,7 @@ func DisableCoverageCounting() {
 }
 
 func ClearCounters() {
+	clearedCountsMu.Lock()
 	entryMapMu.Lock()
 	chanGIDMapMu.Lock()
 	gMapMu.Lock()
@@ -37,10 +38,64 @@ func ClearCounters() {
 	entryMap = make(map[string]*TraceEntry)
 	gMap = make(map[uint64]*TraceG)
 	chanGIDMap = make(map[uintptr]*chanLinks)
+	clearedCounts = make(map[blockKey]int)
 
 	gMapMu.Unlock()
 	chanGIDMapMu.Unlock()
 	entryMapMu.Unlock()
+	clearedCountsMu.Unlock()
+}
+
+// ClearCountersByName discards what the scopes started under name recorded,
+// leaving the results of every other name and the process-wide counts as they
+// were.
+//
+// A goroutine record that a scope of another name also reaches (a worker that
+// both scopes sent to over a channel, for example) is left alone, because that
+// name's result still includes it. Every other record reachable from the
+// cleared scopes stays registered in gMap, so a goroutine that is still running
+// keeps recording into it and can still be linked, but its counters are folded
+// into clearedCounts and its links are dropped, which releases what they held.
+//
+// The records to keep are found without blocking recording, so a channel link
+// made while ClearCountersByName runs can attach a record that is about to be
+// reset to a scope of another name. That scope then sees only what the
+// goroutine records after the reset, which is what it would see had the link
+// been made just after ClearCountersByName returned.
+func ClearCountersByName(name string) {
+	// Held throughout so that folding into clearedCounts neither interleaves
+	// with processCounts nor lands after a concurrent ClearCounters.
+	clearedCountsMu.Lock()
+	defer clearedCountsMu.Unlock()
+
+	var cleared, kept []*TraceG
+	entryMapMu.Lock()
+	for id, e := range entryMap {
+		if e.Name != name {
+			kept = append(kept, e.Roots...)
+			continue
+		}
+		cleared = append(cleared, e.Roots...)
+		delete(entryMap, id)
+	}
+	entryMapMu.Unlock()
+	if len(cleared) == 0 {
+		return
+	}
+
+	keep := walkTraceGs(kept, nil)
+	for g := range walkTraceGs(cleared, nil) {
+		if _, exists := keep[g]; exists {
+			continue
+		}
+		g.mu.Lock()
+		for blockID, count := range g.BlockCounterMap {
+			clearedCounts[blockID] += count
+		}
+		g.BlockCounterMap = make(map[blockKey]int)
+		g.Children = nil
+		g.mu.Unlock()
+	}
 }
 
 // scopeRoots returns the roots of the scopes started under each name. Only the
@@ -336,12 +391,17 @@ func walkTraceGs(roots []*TraceG, visit func(g *TraceG)) map[*TraceG]struct{} {
 }
 
 // processCounts returns how many times each block was passed in the whole
-// process: the counters of every goroutine record, each added once. Every
-// record is registered in gMap, so the records are summed one by one rather
-// than walked through their children, which would add a record again for each
-// of its ancestors.
+// process: the counters of every goroutine record, each added once, plus what
+// ClearCountersByName folded into clearedCounts. Every record is registered in
+// gMap, so the records are summed one by one rather than walked through their
+// children, which would add a record again for each of its ancestors.
 func processCounts() map[blockKey]int {
-	counts := make(map[blockKey]int)
+	clearedCountsMu.Lock()
+	defer clearedCountsMu.Unlock()
+
+	counts := make(map[blockKey]int, len(clearedCounts))
+	maps.Copy(counts, clearedCounts)
+
 	gMapMu.RLock()
 	gs := slices.Collect(maps.Values(gMap))
 	gMapMu.RUnlock()
@@ -365,6 +425,12 @@ var (
 	entryMapMu       sync.RWMutex
 	gMap             map[uint64]*TraceG
 	gMapMu           sync.RWMutex
+	// clearedCounts holds the counters that ClearCountersByName released from
+	// goroutine records, so that the process-wide counts keep them. It is the
+	// only place they remain once the records are reset, and it is bounded by
+	// the number of blocks.
+	clearedCounts   map[blockKey]int
+	clearedCountsMu sync.Mutex
 	// blockMap, mds, funcMap, allCoverprofileMap and allCoverprofileMapKeys
 	// are filled once by decodeRawMetas and never modified afterwards, so
 	// readers that went through decodeRawMetas need no lock.
@@ -599,9 +665,11 @@ func init() {
 
 func initMap() {
 	initOnce.Do(func() {
+		clearedCountsMu.Lock()
 		entryMapMu.Lock()
 		chanGIDMapMu.Lock()
 		gMapMu.Lock()
+		defer clearedCountsMu.Unlock()
 		defer entryMapMu.Unlock()
 		defer chanGIDMapMu.Unlock()
 		defer gMapMu.Unlock()
@@ -612,6 +680,7 @@ func initMap() {
 		funcMap = make(map[string]*Function)
 		allCoverprofileMap = make(map[blockKey]*CoverEntry)
 		chanGIDMap = make(map[uintptr]*chanLinks)
+		clearedCounts = make(map[blockKey]int)
 	})
 }
 
