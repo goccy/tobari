@@ -47,6 +47,25 @@ func ClearCounters() {
 	tobari.ClearCounters()
 }
 
+// ClearCountersByName discards the coverage recorded by the scopes started with
+// CoverWithName under name (Cover uses the empty name) and releases the memory
+// it held. It is intended for exporting the result of a name, with
+// CoverprofileByName for example, and then discarding it.
+//
+// The results of every other name are left as they were, and so are the
+// counts of the whole process written by WriteAllCoverprofile and reported in
+// CoverReport.AllCounts; ClearCounters resets those. A goroutine that a scope
+// of another name also reaches, such as a worker that both scopes sent to over
+// a channel, is kept for that name.
+//
+// A scope of name that is still running when ClearCountersByName is called is
+// discarded too, including what it records afterwards. When measurements under
+// one name can overlap, give each measurement its own name so that clearing
+// one does not discard another.
+func ClearCountersByName(name string) {
+	tobari.ClearCountersByName(name)
+}
+
 // Cover this feature is used to scoped coverage measurement.
 // While `runtime/coverage` measures coverage across entire specified packages,
 // using this feature allows coverage to be measured for specific functions.

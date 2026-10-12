@@ -127,6 +127,18 @@ When outputting coverage data, you can use `WriteCoverprofileByName` or `Coverpr
 
 These APIs can be executed by creating a separate gRPC server and calling specific endpoints when E2E tests finish.
 
+To send each result elsewhere as soon as it is measured and then drop it from memory, call `ClearCountersByName` after reading it. Unlike `ClearCounters`, which resets everything, it discards only the given name. The results of other names stay as they are, and so do the counts of the whole process written by `WriteAllCoverprofile`.
+
+```go
+tobari.CoverWithName(scenarioName, func() {
+  res, err = handler(ctx, req)
+})
+send(tobari.CoverprofileByName(scenarioName, tobari.SetMode))
+tobari.ClearCountersByName(scenarioName)
+```
+
+A scope of that name that is still running when `ClearCountersByName` is called is discarded too. If measurements under one name can overlap, give each one its own name.
+
 ### 3. Build the Application
 
 Then, when building the application you want to measure coverage for, simply specify GOFLAGS as follows:
