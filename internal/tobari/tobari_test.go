@@ -70,8 +70,6 @@ func setupTestCoverMeta(t *testing.T) *TraceEntry {
 // and fails the test if any DepRefs slice contains a nil element.
 func depRefsLen(t *testing.T) map[string]int {
 	t.Helper()
-	funcMapMu.RLock()
-	defer funcMapMu.RUnlock()
 	ret := make(map[string]int, len(funcMap))
 	for name, fn := range funcMap {
 		for i, ref := range fn.DepRefs {
@@ -84,7 +82,7 @@ func depRefsLen(t *testing.T) map[string]int {
 	return ret
 }
 
-// Concurrent CoverprofileMap calls must not race on the shared Function
+// Concurrent coverprofileMap calls must not race on the shared Function
 // dependency graph. Before the fix, resolveCandidateFuncMap appended to
 // fn.DepRefs under a read lock, so concurrent calls corrupted the slice and
 // crashed with a nil pointer dereference while recursing over DepRefs.
@@ -101,7 +99,7 @@ func TestCoverprofileMapConcurrentDepResolution(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
-				entry.CoverprofileMap()
+				coverprofileMap(entry.Roots)
 			}
 		}()
 	}
@@ -110,20 +108,20 @@ func TestCoverprofileMapConcurrentDepResolution(t *testing.T) {
 	depRefsLen(t)
 }
 
-// Repeated CoverprofileMap calls must not keep growing fn.DepRefs. Before the
+// Repeated coverprofileMap calls must not keep growing fn.DepRefs. Before the
 // fix, every call re-appended the same resolved references because the
 // visited set was per-call while DepRefs persisted on the shared Function.
 func TestCoverprofileMapRepeatedCallsKeepDepRefsStable(t *testing.T) {
 	entry := setupTestCoverMeta(t)
 
-	entry.CoverprofileMap()
+	coverprofileMap(entry.Roots)
 	before := depRefsLen(t)
-	entry.CoverprofileMap()
+	coverprofileMap(entry.Roots)
 	after := depRefsLen(t)
 
 	for name, beforeLen := range before {
 		if afterLen := after[name]; afterLen != beforeLen {
-			t.Errorf("function %s: DepRefs grew from %d to %d across CoverprofileMap calls", name, beforeLen, afterLen)
+			t.Errorf("function %s: DepRefs grew from %d to %d across coverprofileMap calls", name, beforeLen, afterLen)
 		}
 	}
 }
@@ -135,14 +133,14 @@ func TestCoverprofileMapRepeatedCallsKeepDepRefsStable(t *testing.T) {
 func TestCoverprofileMapPassedBlocksOnly(t *testing.T) {
 	entry := setupTestCoverMeta(t)
 
-	if got := len(entry.CoverprofileMap()); got <= 1 {
+	if got := len(coverprofileMap(entry.Roots)); got <= 1 {
 		t.Fatalf("default mode must add the blocks that could have been passed, got %d entries", got)
 	}
 
 	passedBlocksOnly = true
 	t.Cleanup(func() { passedBlocksOnly = false })
 
-	got := entry.CoverprofileMap()
+	got := coverprofileMap(entry.Roots)
 	passed := blockID(testFileName, 0)
 	if len(got) != 1 || got[passed] == nil {
 		t.Fatalf("expected only the passed block %v, got %d entries", passed, len(got))
@@ -157,9 +155,8 @@ func TestCoverprofileMapPassedBlocksOnly(t *testing.T) {
 // may mention it otherwise, keeping default reports byte-identical.
 func TestMarshalCoverPassedBlocksOnly(t *testing.T) {
 	setupTestCoverMeta(t)
-	root := newTraceG(2)
-	root.addCounter(blockID(testFileName, 1))
-	setEntry("marshal-passed-blocks-only", &TraceEntry{Name: "marshal-passed-blocks-only", Roots: []*TraceG{root}})
+	coverAs("marshal-passed-blocks-only", 2)
+	hit(2, 0, 1)
 
 	type report struct {
 		Metadata map[string]json.RawMessage   `json:"metadata"`
