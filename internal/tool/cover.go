@@ -16,7 +16,7 @@ func handleCover(ctx context.Context, toolPath string, args []string, opts Build
 			PassedBlocksOnly: opts.PassedBlocksOnly,
 		})
 	}
-	runCommand(toolPath, args)
+	runCommand(ctx, toolPath, args)
 	return nil
 }
 

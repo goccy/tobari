@@ -132,7 +132,7 @@ func handleCompile(ctx context.Context, toolPath string, args []string, opts Bui
 	if err := addTobariPkgsToImportcfgFromCompileOptions(args, opts); err != nil {
 		return err
 	}
-	runCommand(toolPath, args)
+	runCommand(ctx, toolPath, args)
 	return nil
 }
 

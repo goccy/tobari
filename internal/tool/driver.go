@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,7 +38,16 @@ type goListPackage struct {
 }
 
 // HandlePackagesDriver handles the GOPACKAGESDRIVER protocol.
-func HandlePackagesDriver(ctx context.Context, patterns []string) error {
+func HandlePackagesDriver(ctx context.Context, patterns []string) (e error) {
+	_, finish, err := startToolTelemetry(ctx, packagesDriverToolName)
+	if err != nil {
+		return err
+	}
+	defer func() { e = errors.Join(e, finish(e)) }()
+	return handlePackagesDriver(patterns)
+}
+
+func handlePackagesDriver(patterns []string) error {
 	var req packages.DriverRequest
 	if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil {
 		return fmt.Errorf("failed to decode driver request: %w", err)

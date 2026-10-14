@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,10 +13,11 @@ import (
 	"strings"
 
 	"github.com/goccy/tobari/internal/overlay"
+	"github.com/goccy/tobari/internal/telemetry"
 	"github.com/goccy/tobari/internal/version"
 )
 
-func Handle(ctx context.Context, args []string, opts BuildOpts) error {
+func Handle(ctx context.Context, args []string, opts BuildOpts) (e error) {
 	toolPath := args[1]
 	toolArgs := args[2:]
 
@@ -25,6 +27,13 @@ func Handle(ctx context.Context, args []string, opts BuildOpts) error {
 	}
 
 	toolName := filepath.Base(toolPath)
+
+	ctx, finish, err := startToolTelemetry(ctx, toolName)
+	if err != nil {
+		return err
+	}
+	defer func() { e = errors.Join(e, finish(e)) }()
+
 	switch toolName {
 	case "compile":
 		if err := handleCompile(ctx, toolPath, toolArgs, opts); err != nil {
@@ -43,24 +52,35 @@ func Handle(ctx context.Context, args []string, opts BuildOpts) error {
 			return err
 		}
 	default:
-		runCommand(toolPath, toolArgs)
+		runCommand(ctx, toolPath, toolArgs)
 	}
 	return nil
 }
 
-func runCommand(bin string, args []string) {
+// runCommand runs the real Go tool and, when it fails, exits with its status.
+// Exiting skips the deferred telemetry flush of Handle, so the failure path
+// flushes on its own before leaving.
+func runCommand(ctx context.Context, bin string, args []string) {
+	_, span := telemetry.Start(ctx, "tobari.tool.exec")
 	cmd := exec.Command(bin, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
-	if err := cmd.Run(); err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			os.Exit(ee.ExitCode())
-		}
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
+	err := cmd.Run()
+	span.Fail(err)
+	span.End()
+	if err == nil {
+		return
 	}
+	if err := telemetry.Flush(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+	}
+	if ee, ok := err.(*exec.ExitError); ok {
+		os.Exit(ee.ExitCode())
+	}
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(2)
 }
 
 func handleVersionFull(ctx context.Context, toolPath string, args []string, opts BuildOpts) error {
